@@ -18,6 +18,8 @@ Each is called during render, identified by its source location, and returns an 
 | `use_persisted(window, cx, path, default)` | read/write a JSON prefs file by hand | `T`, `.set(v, cx)` |
 | `use_interval(window, cx, period)` | a spawn-loop with a timer | `.ticks()` |
 | `use_keyboard(window, cx).bind("cmd-k", h)` | `actions!` + keymap JSON + focus handle | `.attach(div())` on the root |
+| `use_clipboard(window, cx)` | write_to_clipboard + a "Copied!" timer | `.copy(text, cx)`, `.copied()`, `.read(cx)` |
+| `use_previous(window, cx, value)` | a `last_value` field on the view | `Option<T>` from the last render |
 
 ```rust
 let text = use_debounce(window, cx, self.query.clone(), Duration::from_millis(250));
