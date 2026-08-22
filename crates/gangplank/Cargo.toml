@@ -11,7 +11,13 @@ license = "MIT"
 # crate version or the two cannot mix in one binary.
 gpui = { package = "gpui", git = "https://github.com/gpui-ce/gpui-ce", rev = "60436515630ef254bfa17d51d1bb717a51d66f37" }
 
+dirs = "6"
+serde = "1"
+serde_json = "1"
+
 [dev-dependencies]
+serde = { version = "1", features = ["derive"] }
+tempfile = "3"
 # Examples need a platform backend. font-kit is not optional on macOS: without
 # it the fallback text backend shapes glyphs but never draws them.
 gpui_platform = { git = "https://github.com/gpui-ce/gpui-ce", rev = "60436515630ef254bfa17d51d1bb717a51d66f37", features = ["font-kit"] }

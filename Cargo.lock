@@ -2038,8 +2038,12 @@ dependencies = [
 name = "gangplank"
 version = "0.1.0"
 dependencies = [
+ "dirs 6.0.0",
  "gpui",
  "gpui_platform",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]
