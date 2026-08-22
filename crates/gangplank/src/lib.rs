@@ -12,6 +12,7 @@ compile_error!("gangplank: enable the `ce` feature (gpui-ce) or `zed` (gpui from
 extern crate gpui_zed as gpui;
 
 mod clipboard;
+mod command;
 mod debounce;
 mod dialog;
 mod file_watch;
@@ -24,6 +25,7 @@ mod resource;
 mod selectable_text;
 
 pub use clipboard::{Clipboard, use_clipboard, use_keyed_clipboard};
+pub use command::{CommandState, Output, use_command, use_keyed_command};
 pub use debounce::{DebouncedState, use_debounce, use_keyed_debounce};
 pub use dialog::{pick_file, pick_files, pick_save_path};
 pub use file_watch::{FileWatch, use_file_watch, use_keyed_file_watch};
