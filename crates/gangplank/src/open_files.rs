@@ -68,7 +68,7 @@ impl OpenFiles {
         };
         match (handler, app) {
             (Some(handler), Some(app)) => {
-                app.update(|cx| handler(&paths, cx)).ok();
+                let _ = app.update(|cx| handler(&paths, cx));
             }
             _ => self.0.borrow_mut().buffered.extend(paths),
         }

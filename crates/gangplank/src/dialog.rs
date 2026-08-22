@@ -15,7 +15,7 @@ pub fn pick_files(
     let rx = cx.prompt_for_paths(options);
     cx.spawn(async move |cx| {
         if let Ok(Ok(Some(paths))) = rx.await {
-            cx.update(|cx| on_pick(paths, cx)).ok();
+            let _ = cx.update(|cx| on_pick(paths, cx));
         }
     })
 }
@@ -40,7 +40,7 @@ pub fn pick_save_path(
     let rx = cx.prompt_for_new_path(directory, suggested_name);
     cx.spawn(async move |cx| {
         if let Ok(Ok(Some(path))) = rx.await {
-            cx.update(|cx| on_pick(path, cx)).ok();
+            let _ = cx.update(|cx| on_pick(path, cx));
         }
     })
 }
