@@ -1,0 +1,10 @@
+[workspace]
+resolver = "3"
+members = ["crates/gangplank", "crates/cargo-gangplank"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.91"
+license = "MIT"
+repository = "https://github.com/xeind/gangplank"

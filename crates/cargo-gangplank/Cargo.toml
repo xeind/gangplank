@@ -1,0 +1,17 @@
+[package]
+name = "cargo-gangplank"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Bundle a GPUI app into a macOS .app from one Cargo.toml table"
+
+[[bin]]
+name = "cargo-gangplank"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+cargo_metadata = "0.19"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
