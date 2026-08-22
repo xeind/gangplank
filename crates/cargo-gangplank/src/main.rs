@@ -19,6 +19,8 @@
 //! file-types = ["public.comma-separated-values-text"]  # UTIs this app opens
 //! url-schemes = ["csvgrid"]            # csvgrid://… links
 //! agent = true                         # LSUIElement: no Dock icon (panel apps)
+//! sign = "Developer ID Application: Name (TEAMID)"  # default: ad-hoc
+//! notarize-profile = "gangplank"       # `xcrun notarytool store-credentials`
 //! minimum-system-version = "11.0"
 //! ```
 
@@ -42,6 +44,8 @@ struct Config {
     #[serde(default)]
     agent: bool,
     minimum_system_version: Option<String>,
+    sign: Option<String>,
+    notarize_profile: Option<String>,
 }
 
 fn main() -> Result<()> {
@@ -56,19 +60,23 @@ fn main() -> Result<()> {
         Some("run") => {
             // Launch the bundle, not the bare binary, so file-open and URL
             // events reach the app the way they will after shipping.
-            let app = bundle(release)?;
+            let (app, _) = bundle(release)?;
             let files = args.iter().skip(1).filter(|a| !a.starts_with("--"));
             run(Command::new("open").arg("-a").arg(&app).args(files))
         }
         Some("dmg") => {
-            let app = bundle(release)?;
-            dmg(&app)
+            let (app, config) = bundle(release)?;
+            let out = dmg(&app)?;
+            match config.notarize_profile {
+                Some(profile) => notarize(&out, &profile),
+                None => Ok(()),
+            }
         }
         _ => bail!("usage: cargo gangplank <bundle|run|dmg> [--release] [files...]"),
     }
 }
 
-fn bundle(release: bool) -> Result<PathBuf> {
+fn bundle(release: bool) -> Result<(PathBuf, Config)> {
     let metadata = MetadataCommand::new().exec().context("cargo metadata")?;
     let package = metadata
         .root_package()
@@ -117,14 +125,21 @@ fn bundle(release: bool) -> Result<PathBuf> {
         plist(&config, &name, &identifier, &bin, &package.version.to_string(), has_icon),
     )?;
 
-    // Ad-hoc signature. Without it macOS kills the app on launch on Apple silicon.
-    run(Command::new("codesign").args(["--force", "--sign", "-"]).arg(app))?;
+    // Without a signature macOS kills the app on launch on Apple silicon.
+    // Ad-hoc is enough locally; notarization needs a Developer ID and the
+    // hardened runtime.
+    let mut codesign = Command::new("codesign");
+    codesign.args(["--force", "--sign", config.sign.as_deref().unwrap_or("-")]);
+    if config.sign.is_some() {
+        codesign.args(["--options", "runtime", "--timestamp"]);
+    }
+    run(codesign.arg(app))?;
     // Register now, not whenever Launch Services next rescans; otherwise the
     // document types can take minutes to appear.
     run(Command::new(LSREGISTER).arg("-f").arg(app))?;
 
     println!("built {}", app.display());
-    Ok(app.to_path_buf())
+    Ok((app.to_path_buf(), config))
 }
 
 const LSREGISTER: &str = "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister";
@@ -132,7 +147,7 @@ const LSREGISTER: &str = "/System/Library/Frameworks/CoreServices.framework/Fram
 /// A compressed read-only image holding the `.app` and a link to
 /// /Applications, so drag-to-install works. Staged in a temp folder since
 /// `hdiutil -srcfolder` images a whole directory.
-fn dmg(app: &Path) -> Result<()> {
+fn dmg(app: &Path) -> Result<PathBuf> {
     let name = app.file_stem().unwrap().to_string_lossy().to_string();
     let staging = app.with_file_name(format!("{name}.dmg-staging"));
     let out = app.with_file_name(format!("{name}.dmg"));
@@ -148,6 +163,20 @@ fn dmg(app: &Path) -> Result<()> {
         .stdout(std::process::Stdio::null()))?;
     fs::remove_dir_all(&staging)?;
     println!("built {}", out.display());
+    Ok(out)
+}
+
+/// Submit the dmg to Apple, wait for the verdict, and staple the ticket so
+/// Gatekeeper accepts it offline. Credentials come from a keychain profile
+/// made once with `xcrun notarytool store-credentials <profile>`.
+///
+/// Untested: no Developer ID on the machine this was written on.
+fn notarize(dmg: &Path, profile: &str) -> Result<()> {
+    run(Command::new("xcrun")
+        .args(["notarytool", "submit", "--keychain-profile", profile, "--wait"])
+        .arg(dmg))?;
+    run(Command::new("xcrun").args(["stapler", "staple"]).arg(dmg))?;
+    println!("notarized {}", dmg.display());
     Ok(())
 }
 

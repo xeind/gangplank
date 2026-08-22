@@ -36,13 +36,16 @@ icon = "assets/icon.png"
 file-types = ["public.comma-separated-values-text"]
 url-schemes = ["csvgrid"]
 agent = false   # true for LSUIElement panel apps
+# For release builds. Make the profile once: xcrun notarytool store-credentials gangplank
+sign = "Developer ID Application: Your Name (TEAMID)"
+notarize-profile = "gangplank"
 ```
 
 ```sh
 cargo install --path crates/cargo-gangplank
 cargo gangplank bundle              # target/debug/<Name>.app
 cargo gangplank run "my data.csv"   # bundle, then open it like Finder would
-cargo gangplank dmg --release       # target/release/<Name>.dmg, drag-to-install
+cargo gangplank dmg --release       # target/release/<Name>.dmg, drag-to-install; notarized if configured
 ```
 
-Output lands in `target/<profile>/<Name>.app`, ad-hoc signed and registered with Launch Services.
+Output lands in `target/<profile>/<Name>.app`, ad-hoc signed (or Developer ID when `sign` is set) and registered with Launch Services. Notarization is untested so far: no Developer ID on the machine it was written on. Report what breaks.
