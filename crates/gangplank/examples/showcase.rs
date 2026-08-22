@@ -42,7 +42,7 @@ impl Render for Showcase {
             Resource::Ready(n) => format!("{n} results for {settled:?}"),
         };
 
-        let clipboard = use_clipboard(window, cx);
+        let clipboard = use_clipboard(window, cx, Duration::from_secs(2));
         let ticks = use_interval(window, cx, Duration::from_secs(1)).read(cx).ticks();
         let changes = use_file_watch(window, cx, WATCHED, Duration::from_millis(500)).read(cx).version();
 

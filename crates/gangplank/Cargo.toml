@@ -14,6 +14,9 @@ description = "Hooks for GPUI: async state, debounce, persistence, shortcuts, an
 default = ["ce"]
 ce = ["dep:gpui"]
 zed = ["dep:gpui_zed"]
+# gpui-ce git HEAD after 2026-01 changed `Window::focus` to take a `cx`. Enable
+# this with `zed` plus a `[patch.crates-io] gpui = { git = ..., rev = ... }`.
+gpui-git = []
 
 [dependencies]
 gpui = { package = "gpui-ce", version = "0.3", optional = true }

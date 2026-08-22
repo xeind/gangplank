@@ -10,7 +10,7 @@ struct Probe {
 
 impl Render for Probe {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.seen = Some(use_clipboard(window, cx));
+        self.seen = Some(use_clipboard(window, cx, Duration::from_secs(2)));
         div()
     }
 }
@@ -30,7 +30,12 @@ fn copied_flag_clears_after_two_seconds(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert!(clip.read_with(cx, |c, _| c.copied()), "still shown at 1 s");
 
-    cx.executor().advance_clock(Duration::from_secs(1));
+    // A second copy restarts the clock: the first deadline must not end it.
+    clip.update(cx, |c, cx| c.copy("again", cx));
+    cx.executor().advance_clock(Duration::from_millis(1500));
     cx.run_until_parked();
-    assert!(!clip.read_with(cx, |c, _| c.copied()), "cleared at 2 s");
+    assert!(clip.read_with(cx, |c, _| c.copied()), "first timer must not cut the second flash short");
+    cx.executor().advance_clock(Duration::from_millis(500));
+    cx.run_until_parked();
+    assert!(!clip.read_with(cx, |c, _| c.copied()));
 }

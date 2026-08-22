@@ -77,6 +77,9 @@ pub fn use_keyed_keyboard(id: impl Into<ElementId>, window: &mut Window, cx: &mu
         .read(cx)
         .clone();
     if window.focused(cx).is_none() {
+        #[cfg(feature = "gpui-git")]
+        window.focus(&focus, cx);
+        #[cfg(not(feature = "gpui-git"))]
         window.focus(&focus);
     }
     Shortcuts { focus, bindings: Vec::new() }
