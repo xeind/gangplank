@@ -17,6 +17,7 @@ Each is called during render, identified by its source location, and returns an 
 | `use_debounce(window, cx, value, delay)` | timer you reset on every keystroke | settled `T` |
 | `use_persisted(window, cx, path, default)` | read/write a JSON prefs file by hand | `T`, `.set(v, cx)` |
 | `use_interval(window, cx, period)` | a spawn-loop with a timer | `.ticks()` |
+| `use_keyboard(window, cx).bind("cmd-k", h)` | `actions!` + keymap JSON + focus handle | `.attach(div())` on the root |
 
 ```rust
 let text = use_debounce(window, cx, self.query.clone(), Duration::from_millis(250));
