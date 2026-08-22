@@ -1,4 +1,5 @@
 //! `cargo gangplank bundle` — build a GPUI binary into a macOS `.app`.
+//! `cargo gangplank run [files]` — bundle, then open it like Finder would.
 //!
 //! gpui-ce ships no packaging story. Finder will not hand a file to a bare
 //! binary; it needs a bundle with `CFBundleDocumentTypes`, and Gatekeeper
@@ -12,6 +13,7 @@
 //! [package.metadata.gangplank]
 //! name = "CsvGrid"                     # bundle display name (default: package name)
 //! identifier = "com.xein.csvgrid"      # required
+//! icon = "assets/icon.png"            # square PNG, 1024px ideally
 //! file-types = ["public.comma-separated-values-text"]  # UTIs this app opens
 //! url-schemes = ["csvgrid"]            # csvgrid://… links
 //! agent = true                         # LSUIElement: no Dock icon (panel apps)
@@ -22,7 +24,7 @@ use anyhow::{Context, Result, bail};
 use cargo_metadata::{MetadataCommand, Package};
 use serde::Deserialize;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 #[derive(Debug, Default, Deserialize)]
@@ -30,6 +32,7 @@ use std::process::Command;
 struct Config {
     name: Option<String>,
     identifier: Option<String>,
+    icon: Option<PathBuf>,
     #[serde(default)]
     file_types: Vec<String>,
     #[serde(default)]
@@ -47,12 +50,19 @@ fn main() -> Result<()> {
     }
     let release = args.iter().any(|a| a == "--release");
     match args.first().map(String::as_str) {
-        Some("bundle") => bundle(release),
-        _ => bail!("usage: cargo gangplank bundle [--release]"),
+        Some("bundle") => bundle(release).map(drop),
+        Some("run") => {
+            // Launch the bundle, not the bare binary, so file-open and URL
+            // events reach the app the way they will after shipping.
+            let app = bundle(release)?;
+            let files = args.iter().skip(1).filter(|a| !a.starts_with("--"));
+            run(Command::new("open").arg("-a").arg(&app).args(files))
+        }
+        _ => bail!("usage: cargo gangplank <bundle|run> [--release] [files...]"),
     }
 }
 
-fn bundle(release: bool) -> Result<()> {
+fn bundle(release: bool) -> Result<PathBuf> {
     let metadata = MetadataCommand::new().exec().context("cargo metadata")?;
     let package = metadata
         .root_package()
@@ -86,9 +96,19 @@ fn bundle(release: bool) -> Result<()> {
         macos.join(&bin),
     )
     .context("copy binary")?;
+    let has_icon = match &config.icon {
+        Some(icon) => {
+            let source = package.manifest_path.parent().unwrap().join(icon.to_str().unwrap());
+            let resources = app.join("Contents/Resources");
+            fs::create_dir_all(&resources)?;
+            write_icns(Path::new(source.as_str()), &resources.join("AppIcon.icns"))?;
+            true
+        }
+        None => false,
+    };
     fs::write(
         app.join("Contents/Info.plist"),
-        plist(&config, &name, &identifier, &bin, &package.version.to_string()),
+        plist(&config, &name, &identifier, &bin, &package.version.to_string(), has_icon),
     )?;
 
     // Ad-hoc signature. Without it macOS kills the app on launch on Apple silicon.
@@ -98,10 +118,35 @@ fn bundle(release: bool) -> Result<()> {
     run(Command::new(LSREGISTER).arg("-f").arg(app))?;
 
     println!("built {}", app.display());
-    Ok(())
+    Ok(app.to_path_buf())
 }
 
 const LSREGISTER: &str = "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister";
+
+/// One PNG in, `.icns` out, via the tools every Mac already has. `sips`
+/// resizes; `iconutil` packs the `.iconset` folder Apple expects.
+fn write_icns(png: &Path, icns: &Path) -> Result<()> {
+    if !png.exists() {
+        bail!("icon not found: {}", png.display());
+    }
+    let iconset = icns.with_extension("iconset");
+    let _ = fs::remove_dir_all(&iconset);
+    fs::create_dir_all(&iconset)?;
+    for (points, scale) in [(16, 1), (16, 2), (32, 1), (32, 2), (128, 1), (128, 2), (256, 1), (256, 2), (512, 1), (512, 2)] {
+        let pixels = points * scale;
+        let suffix = if scale == 1 { String::new() } else { format!("@{scale}x") };
+        let out = iconset.join(format!("icon_{points}x{points}{suffix}.png"));
+        run(Command::new("sips")
+            .args(["-z", &pixels.to_string(), &pixels.to_string()])
+            .arg(png)
+            .arg("--out")
+            .arg(&out)
+            .stdout(std::process::Stdio::null()))?;
+    }
+    run(Command::new("iconutil").args(["-c", "icns"]).arg(&iconset).arg("-o").arg(icns))?;
+    fs::remove_dir_all(&iconset)?;
+    Ok(())
+}
 
 fn bin_name(package: &Package) -> Result<String> {
     let mut bins = package.targets.iter().filter(|t| t.is_bin());
@@ -112,7 +157,14 @@ fn bin_name(package: &Package) -> Result<String> {
     Ok(first.name.clone())
 }
 
-fn plist(config: &Config, name: &str, identifier: &str, bin: &str, version: &str) -> String {
+fn plist(
+    config: &Config,
+    name: &str,
+    identifier: &str,
+    bin: &str,
+    version: &str,
+    has_icon: bool,
+) -> String {
     let mut out = String::new();
     out.push_str(
         r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -136,6 +188,9 @@ fn plist(config: &Config, name: &str, identifier: &str, bin: &str, version: &str
         string(&mut out, key, value);
     }
     out.push_str("\t<key>NSHighResolutionCapable</key>\n\t<true/>\n");
+    if has_icon {
+        string(&mut out, "CFBundleIconFile", "AppIcon");
+    }
     if config.agent {
         out.push_str("\t<key>LSUIElement</key>\n\t<true/>\n");
     }

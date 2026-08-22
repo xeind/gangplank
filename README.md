@@ -30,6 +30,7 @@ let hits = use_resource(window, cx, text.read(cx).value().clone(), |q| search(q)
 [package.metadata.gangplank]
 name = "CsvGrid"
 identifier = "com.xein.csvgrid"
+icon = "assets/icon.png"
 file-types = ["public.comma-separated-values-text"]
 url-schemes = ["csvgrid"]
 agent = false   # true for LSUIElement panel apps
@@ -37,7 +38,8 @@ agent = false   # true for LSUIElement panel apps
 
 ```sh
 cargo install --path crates/cargo-gangplank
-cargo gangplank bundle
+cargo gangplank bundle              # target/debug/<Name>.app
+cargo gangplank run "my data.csv"   # bundle, then open it like Finder would
 ```
 
 Output lands in `target/<profile>/<Name>.app`, ad-hoc signed and registered with Launch Services.
