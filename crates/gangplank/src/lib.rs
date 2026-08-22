@@ -13,6 +13,7 @@ extern crate gpui_zed as gpui;
 
 mod clipboard;
 mod debounce;
+mod dialog;
 mod file_watch;
 mod interval;
 mod keyboard;
@@ -24,6 +25,7 @@ mod selectable_text;
 
 pub use clipboard::{Clipboard, use_clipboard, use_keyed_clipboard};
 pub use debounce::{DebouncedState, use_debounce, use_keyed_debounce};
+pub use dialog::{pick_file, pick_files, pick_save_path};
 pub use file_watch::{FileWatch, use_file_watch, use_keyed_file_watch};
 pub use interval::{Interval, use_interval, use_keyed_interval};
 pub use keyboard::{Shortcuts, use_keyboard, use_keyed_keyboard};
