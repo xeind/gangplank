@@ -19,6 +19,7 @@ mod keyboard;
 mod persisted;
 mod previous;
 mod resource;
+mod selectable_text;
 
 pub use clipboard::{Clipboard, use_clipboard, use_keyed_clipboard};
 pub use debounce::{DebouncedState, use_debounce, use_keyed_debounce};
@@ -28,3 +29,4 @@ pub use keyboard::{Shortcuts, use_keyboard, use_keyed_keyboard};
 pub use persisted::{Persisted, data_dir, use_keyed_persisted, use_persisted};
 pub use previous::{use_keyed_previous, use_previous};
 pub use resource::{Resource, ResourceState, use_keyed_resource, use_resource};
+pub use selectable_text::{SelectableText, Selection, selectable_text, use_keyed_selection, use_selection};
