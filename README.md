@@ -30,6 +30,11 @@ Each is called during render, identified by its source location, and returns an 
 | `use_clipboard(window, cx, show_for)` | write_to_clipboard + a "Copied!" timer | `.copy(text, cx)`, `.copied()`, `.read(cx)` |
 | `use_previous(window, cx, value)` | a `last_value` field on the view | `Option<T>` from the last render |
 | `use_file_watch(window, cx, path, period)` | a polling thread + channel | `.version()`, bumps on change |
+| `use_command(window, cx, prog, args, period)` | a spawn-loop that shells out | `Output` of the last run |
+| `use_selection(window, cx)` + `selectable_text(id, text, &sel)` | hand-rolled drag/double-click selection on read-only text | selected `&str`, copy via cmd-c; single line |
+| `use_open_files(window, cx, handler)` with `OpenFiles::install(&app)` / `.ready(cx)` | `on_open_urls` + argv + an inbox for pre-window arrivals | handler gets `&[PathBuf]` |
+| `use_window_state(window, cx, file)` + `saved_window_bounds(file)` | saving bounds on move/resize by hand | window reopens where it closed |
+| `pick_file` / `pick_files` / `pick_save_path` (not a hook) | `cx.prompt_for_paths` plumbing | callback with `PathBuf` |
 
 ```rust
 let text = use_debounce(window, cx, self.query.clone(), Duration::from_millis(250));
