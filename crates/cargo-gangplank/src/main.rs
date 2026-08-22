@@ -1,5 +1,7 @@
 //! `cargo gangplank bundle` — build a GPUI binary into a macOS `.app`.
 //! `cargo gangplank run [files]` — bundle, then open it like Finder would.
+//! `cargo gangplank dmg` — bundle, then wrap it in a `.dmg` with an
+//! Applications shortcut, the file you attach to a GitHub release.
 //!
 //! gpui-ce ships no packaging story. Finder will not hand a file to a bare
 //! binary; it needs a bundle with `CFBundleDocumentTypes`, and Gatekeeper
@@ -58,7 +60,11 @@ fn main() -> Result<()> {
             let files = args.iter().skip(1).filter(|a| !a.starts_with("--"));
             run(Command::new("open").arg("-a").arg(&app).args(files))
         }
-        _ => bail!("usage: cargo gangplank <bundle|run> [--release] [files...]"),
+        Some("dmg") => {
+            let app = bundle(release)?;
+            dmg(&app)
+        }
+        _ => bail!("usage: cargo gangplank <bundle|run|dmg> [--release] [files...]"),
     }
 }
 
@@ -122,6 +128,28 @@ fn bundle(release: bool) -> Result<PathBuf> {
 }
 
 const LSREGISTER: &str = "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister";
+
+/// A compressed read-only image holding the `.app` and a link to
+/// /Applications, so drag-to-install works. Staged in a temp folder since
+/// `hdiutil -srcfolder` images a whole directory.
+fn dmg(app: &Path) -> Result<()> {
+    let name = app.file_stem().unwrap().to_string_lossy().to_string();
+    let staging = app.with_file_name(format!("{name}.dmg-staging"));
+    let out = app.with_file_name(format!("{name}.dmg"));
+    let _ = fs::remove_dir_all(&staging);
+    let _ = fs::remove_file(&out);
+    fs::create_dir_all(&staging)?;
+    run(Command::new("cp").arg("-R").arg(app).arg(&staging))?;
+    std::os::unix::fs::symlink("/Applications", staging.join("Applications"))?;
+    run(Command::new("hdiutil")
+        .args(["create", "-volname", &name, "-format", "UDZO", "-srcfolder"])
+        .arg(&staging)
+        .arg(&out)
+        .stdout(std::process::Stdio::null()))?;
+    fs::remove_dir_all(&staging)?;
+    println!("built {}", out.display());
+    Ok(())
+}
 
 /// One PNG in, `.icns` out, via the tools every Mac already has. `sips`
 /// resizes; `iconutil` packs the `.iconset` folder Apple expects.
