@@ -16,6 +16,8 @@ Your app's `gpui` must be the same crate and version gangplank links, or entity 
 
 ## Hooks
 
+`cargo run --example showcase` shows all of them in one window.
+
 Each is called during render, identified by its source location, and returns an entity the view reads. `use_keyed_*` variants take an explicit id for lists.
 
 | Hook | Replaces | Read |
