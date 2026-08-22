@@ -33,8 +33,8 @@ fn shortcuts_fire_with_and_without_child_focus(cx: &mut TestAppContext) {
     assert_eq!(probe.read_with(cx, |p, _| p.hits.clone()), ["palette"]);
 
     window
-        .update(cx, |probe, window, cx| {
-            window.focus(&probe.child, cx);
+        .update(cx, |probe, window, _| {
+            window.focus(&probe.child);
         })
         .unwrap();
     cx.run_until_parked();

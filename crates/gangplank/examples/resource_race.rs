@@ -5,7 +5,7 @@
 //! watch for two seconds. The verdict line must never read MISMATCH.
 
 use gpui::{
-    App, Bounds, Context, Render, Window, WindowBounds, WindowOptions, div, prelude::*, px, rgb,
+    App, Application, Bounds, Context, Render, Window, WindowBounds, WindowOptions, div, prelude::*, px, rgb,
     size,
 };
 use gangplank::{Resource, use_resource};
@@ -74,7 +74,7 @@ impl Render for RaceExample {
 }
 
 fn main() {
-    gpui_platform::application().run(|cx: &mut App| {
+    Application::new().run(|cx: &mut App| {
         let bounds = Bounds::centered(None, size(px(640.), px(360.)), cx);
         cx.open_window(
             WindowOptions {
@@ -86,7 +86,7 @@ fn main() {
         .expect("failed to open window");
 
         cx.activate(true);
-        cx.on_window_closed(|cx, _| {
+        cx.on_window_closed(|cx| {
             if cx.windows().is_empty() {
                 cx.quit();
             }

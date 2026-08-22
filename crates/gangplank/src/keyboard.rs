@@ -77,7 +77,7 @@ pub fn use_keyed_keyboard(id: impl Into<ElementId>, window: &mut Window, cx: &mu
         .read(cx)
         .clone();
     if window.focused(cx).is_none() {
-        window.focus(&focus, cx);
+        window.focus(&focus);
     }
     Shortcuts { focus, bindings: Vec::new() }
 }

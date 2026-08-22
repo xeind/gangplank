@@ -5,7 +5,14 @@ The bridge from a GPUI `Render` impl to a shipped app. Two crates:
 - `gangplank` — hooks. Pirates have hooks.
 - `cargo-gangplank` — `cargo gangplank bundle [--release]` turns a GPUI binary into a signed macOS `.app` that Finder will hand files to.
 
-macOS only for now. Targets gpui-ce.
+macOS only for now.
+
+```toml
+gangplank = "0.1"                                              # gpui-ce (default)
+gangplank = { version = "0.1", default-features = false, features = ["zed"] }  # Zed's gpui crate
+```
+
+Your app's `gpui` must be the same crate and version gangplank links, or entity types will not match. The library tracks crates.io releases (`gpui-ce` 0.3, `gpui` 0.2); a git-pinned gpui needs a path dependency on gangplank with the pin changed to match.
 
 ## Hooks
 

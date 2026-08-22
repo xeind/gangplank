@@ -3,6 +3,14 @@
 //! Each hook is called during render, identified by its source location, and
 //! hands back an entity the view reads. See each module for the contract.
 
+#[cfg(all(feature = "ce", feature = "zed"))]
+compile_error!("gangplank: enable one of the `ce` or `zed` features, not both");
+#[cfg(not(any(feature = "ce", feature = "zed")))]
+compile_error!("gangplank: enable the `ce` feature (gpui-ce) or `zed` (gpui from Zed)");
+
+#[cfg(feature = "zed")]
+extern crate gpui_zed as gpui;
+
 mod clipboard;
 mod debounce;
 mod file_watch;
