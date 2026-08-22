@@ -2,10 +2,26 @@
 
 The bridge from a GPUI `Render` impl to a shipped app. Two crates:
 
-- `gangplank` — hooks. `use_resource` (async state keyed by its input), more to come. Pirates have hooks.
+- `gangplank` — hooks. Pirates have hooks.
 - `cargo-gangplank` — `cargo gangplank bundle [--release]` turns a GPUI binary into a signed macOS `.app` that Finder will hand files to.
 
 macOS only for now. Targets gpui-ce.
+
+## Hooks
+
+Each is called during render, identified by its source location, and returns an entity the view reads. `use_keyed_*` variants take an explicit id for lists.
+
+| Hook | Replaces | Read |
+|---|---|---|
+| `use_resource(window, cx, key, async fn)` | spawn + generation counter + stale-result check | `Loading` / `Ready(T)` |
+| `use_debounce(window, cx, value, delay)` | timer you reset on every keystroke | settled `T` |
+| `use_persisted(window, cx, path, default)` | read/write a JSON prefs file by hand | `T`, `.set(v, cx)` |
+| `use_interval(window, cx, period)` | a spawn-loop with a timer | `.ticks()` |
+
+```rust
+let text = use_debounce(window, cx, self.query.clone(), Duration::from_millis(250));
+let hits = use_resource(window, cx, text.read(cx).value().clone(), |q| search(q));
+```
 
 ## Bundle
 
