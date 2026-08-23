@@ -3,3 +3,8 @@
 # Local only
 learn/
 .claude/
+AGENTS.md
+CLAUDE.md
+crates/gangplank/CLAUDE.md
+docs/
+crates/gangplank/docs/
