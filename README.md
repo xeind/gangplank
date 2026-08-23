@@ -46,11 +46,11 @@ let hits = use_resource(window, cx, text.read(cx).value().clone(), |q| search(q)
 
 ```toml
 [package.metadata.gangplank]
-name = "CsvGrid"
-identifier = "com.xein.csvgrid"
+name = "Notes"
+identifier = "com.example.notes"
 icon = "assets/icon.png"
-file-types = ["public.comma-separated-values-text"]
-url-schemes = ["csvgrid"]
+file-types = ["public.plain-text"]
+url-schemes = ["notes"]
 agent = false   # true for LSUIElement panel apps
 # For release builds. Make the profile once: xcrun notarytool store-credentials gangplank
 sign = "Developer ID Application: Your Name (TEAMID)"
@@ -64,4 +64,4 @@ cargo gangplank run "my data.csv"   # bundle, then open it like Finder would
 cargo gangplank dmg --release       # target/release/<Name>.dmg, drag-to-install; notarized if configured
 ```
 
-Output lands in `target/<profile>/<Name>.app`, ad-hoc signed (or Developer ID when `sign` is set) and registered with Launch Services. Notarization is untested so far: no Developer ID on the machine it was written on. Report what breaks.
+Output lands in `target/<profile>/<Name>.app`, ad-hoc signed (or Developer ID when `sign` is set) and registered with Launch Services. Notarization is untested. Report what breaks.
