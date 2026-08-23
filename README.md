@@ -32,6 +32,7 @@ Each is called during render, identified by its source location, and returns an 
 | `use_file_watch(window, cx, path, period)` | a polling thread + channel | `.version()`, bumps on change |
 | `use_command(window, cx, prog, args, period)` | a spawn-loop that shells out | `Output` of the last run |
 | `use_selection(window, cx)` + `selectable_text(id, text, &sel)` | hand-rolled drag/double-click selection on read-only text | selected `&str`, copy via cmd-c; single line |
+| `use_text_input(window, cx)` + `text_input(&state, &focus)` | cursor, selection, IME handler and blink timer for a one-line field | `.text()`, `.selection()`; `on_submit` / `on_cancel` for Enter / Esc |
 | `use_open_files(window, cx, handler)` with `OpenFiles::install(&app)` / `.ready(cx)` | `on_open_urls` + argv + an inbox for pre-window arrivals | handler gets `&[PathBuf]` |
 | `use_window_state(window, cx, file)` + `saved_window_bounds(file)` | saving bounds on move/resize by hand | window reopens where it closed |
 | `pick_file` / `pick_files` / `pick_save_path` (not a hook) | `cx.prompt_for_paths` plumbing | callback with `PathBuf` |

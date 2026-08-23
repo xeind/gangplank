@@ -23,6 +23,7 @@ mod persisted;
 mod previous;
 mod resource;
 mod selectable_text;
+mod text_input;
 mod window_state;
 
 pub use clipboard::{Clipboard, use_clipboard, use_keyed_clipboard};
@@ -37,4 +38,5 @@ pub use persisted::{Persisted, data_dir, use_keyed_persisted, use_persisted};
 pub use previous::{use_keyed_previous, use_previous};
 pub use resource::{Resource, ResourceState, use_keyed_resource, use_resource};
 pub use selectable_text::{SelectableText, Selection, selectable_text, use_keyed_selection, use_selection};
+pub use text_input::{TextInput, TextInputElement, text_input, use_keyed_text_input, use_text_input};
 pub use window_state::{saved_window_bounds, use_keyed_window_state, use_window_state};
