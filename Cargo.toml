@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/gangplank", "crates/cargo-gangplank"]
+members = ["crates/gangplank", "crates/gangplank-gpu", "crates/cargo-gangplank"]
 
 [workspace.package]
 version = "0.1.0"
@@ -8,3 +8,9 @@ edition = "2024"
 rust-version = "1.91"
 license = "MIT"
 repository = "https://github.com/xeind/gangplank"
+
+# gangplank-gpu needs the CustomPass primitive, which lives on a local
+# gpui-ce fork (branch gpu-canvas-spike). The patch keeps one gpui crate
+# instance for the whole workspace; see docs/decisions/ADR-004-gpui-fork.md.
+[patch.crates-io]
+gpui-ce = { path = "../gpui-gpu-spike/gpui-ce" }

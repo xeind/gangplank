@@ -42,6 +42,20 @@ let text = use_debounce(window, cx, self.query.clone(), Duration::from_millis(25
 let hits = use_resource(window, cx, text.read(cx).value().clone(), |q| search(q));
 ```
 
+## Shaders
+
+`gangplank-gpu`: one Metal fragment function as a GPUI element, with time,
+pointer and resolution uniforms. Needs the gpui-ce fork wired by the
+workspace `[patch.crates-io]`.
+
+```rust
+let plasma = Effect::new("float4 effect(float2 uv, constant EffectUniforms &u) { return float4(uv, 0, 1); }");
+// in render:
+plasma.element(elapsed).size_full()
+```
+
+`cargo run -p gangplank-gpu --example plasma`.
+
 ## Bundle
 
 ```toml

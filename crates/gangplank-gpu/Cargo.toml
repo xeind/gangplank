@@ -1,0 +1,15 @@
+[package]
+name = "gangplank-gpu"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Shader effects inside GPUI layout: a fragment shader as an element, with time, pointer and resolution uniforms"
+
+[dependencies]
+gpui = { package = "gpui-ce", version = "0.3" }
+log = "0.4"
+
+[dev-dependencies]
+gpui = { package = "gpui-ce", version = "0.3", features = ["test-support"] }
