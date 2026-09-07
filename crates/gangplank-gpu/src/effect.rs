@@ -1,3 +1,4 @@
+use crate::params::{Param, ParamError, ParamLayout, ParamValue};
 use gpui::{GpuCanvas, GpuCanvasFrame, GpuCanvasRenderer, gpu_canvas, metal};
 use std::{cell::RefCell, rc::Rc, time::Duration};
 
@@ -126,18 +127,24 @@ float effect_corner_coverage(float2 p, float2 size, float4 radii) {
 "#;
 
 /// The fragment entry, after the user's source so it can call `effect`.
-/// `EffectBackdrop` in the source selects the three-argument form.
+/// `EffectBackdrop` in the source adds the backdrop argument and
+/// `EffectParams` adds the params argument, in that order.
 fn fragment_entry(source: &str) -> String {
-    let call = if source.contains("EffectBackdrop") {
-        "effect(in.uv, u, backdrop)"
-    } else {
-        "effect(in.uv, u)"
+    let call = match (
+        source.contains("EffectBackdrop"),
+        source.contains("EffectParams"),
+    ) {
+        (false, false) => "effect(in.uv, u)",
+        (true, false) => "effect(in.uv, u, backdrop)",
+        (false, true) => "effect(in.uv, u, p)",
+        (true, true) => "effect(in.uv, u, backdrop, p)",
     };
     format!(
         r#"
 fragment float4 effect_fragment(EffectVertex in [[stage_in]],
                                 constant EffectUniforms &u [[buffer(0)]],
                                 constant float2 &viewport [[buffer(1)]],
+                                constant EffectParams &p [[buffer(2)]],
                                 texture2d<float> backdrop_texture [[texture(0)]],
                                 sampler backdrop_sampler [[sampler(0)]]) {{
     EffectBackdrop backdrop {{ backdrop_texture, backdrop_sampler, viewport, u.origin, u.resolution }};
@@ -148,6 +155,15 @@ fragment float4 effect_fragment(EffectVertex in [[stage_in]],
     return color;
 }}
 "#
+    )
+}
+
+/// Preamble, params struct, user source, entry: what Metal compiles.
+fn full_source(source: &str, params: &ParamLayout) -> String {
+    format!(
+        "{PREAMBLE}\n{}\n{source}\n{}",
+        params.msl_struct(),
+        fragment_entry(source)
     )
 }
 
@@ -167,6 +183,9 @@ enum Pipeline {
 struct Inner {
     source: String,
     pipeline: Pipeline,
+    /// App parameters, uploaded at buffer(2) as `EffectParams`.
+    params: ParamLayout,
+    warned_unread_params: bool,
     /// The shader reads the pointer, so the element follows it.
     reads_pointer: bool,
 }
@@ -196,8 +215,31 @@ impl Effect {
         Effect(Rc::new(RefCell::new(Inner {
             source: source.into(),
             pipeline: Pipeline::Pending,
+            params: ParamLayout::empty(),
+            warned_unread_params: false,
             reads_pointer: false,
         })))
+    }
+
+    /// Declare app parameters, in struct order. The shader receives them as
+    /// `constant EffectParams &p`; take it as a third argument, or a fourth
+    /// after the backdrop. Call before the first frame.
+    pub fn params(self, decls: &[(&str, Param)]) -> Result<Self, ParamError> {
+        self.0.borrow_mut().params = ParamLayout::new(decls)?;
+        Ok(self)
+    }
+
+    /// Write one parameter. The next frame sees it; call `cx.notify()` to
+    /// get one. Errors name the problem, so `?` or `expect` at the call.
+    pub fn set(&self, name: &str, value: impl Into<ParamValue>) -> Result<(), ParamError> {
+        let mut inner = self.0.borrow_mut();
+        if !inner.warned_unread_params && !inner.source.contains("EffectParams") {
+            inner.warned_unread_params = true;
+            log::warn!(
+                "gangplank-gpu: set(\"{name}\") on an effect whose shader never reads EffectParams"
+            );
+        }
+        inner.params.set(name, value.into())
     }
 
     /// Wrap a Shadertoy or Ghostty style GLSL shader. See [`crate::glsl_to_msl`]
@@ -226,10 +268,16 @@ impl Effect {
     }
 }
 
-impl Inner {
-    fn pipeline(&mut self, frame: &GpuCanvasFrame<'_>) -> Option<&Ready> {
-        if let Pipeline::Pending = self.pipeline {
-            self.pipeline = match build_pipeline(&self.source, frame) {
+impl Pipeline {
+    /// Build on first use, then hand back the compiled state.
+    fn ready(
+        &mut self,
+        source: &str,
+        params: &ParamLayout,
+        frame: &GpuCanvasFrame<'_>,
+    ) -> Option<&Ready> {
+        if let Pipeline::Pending = self {
+            *self = match build_pipeline(source, params, frame) {
                 Ok(ready) => Pipeline::Ready(ready),
                 Err(err) => {
                     log::error!("gangplank-gpu: effect failed to compile: {err}");
@@ -237,15 +285,19 @@ impl Inner {
                 }
             };
         }
-        match &self.pipeline {
+        match self {
             Pipeline::Ready(ready) => Some(ready),
             _ => None,
         }
     }
 }
 
-fn build_pipeline(source: &str, frame: &GpuCanvasFrame<'_>) -> Result<Ready, String> {
-    let full = format!("{PREAMBLE}\n{source}\n{}", fragment_entry(source));
+fn build_pipeline(
+    source: &str,
+    params: &ParamLayout,
+    frame: &GpuCanvasFrame<'_>,
+) -> Result<Ready, String> {
+    let full = full_source(source, params);
     let library = frame
         .device
         .new_library_with_source(&full, &metal::CompileOptions::new())?;
@@ -300,7 +352,10 @@ fn build_pipeline(source: &str, frame: &GpuCanvasFrame<'_>) -> Result<Ready, Str
 
 impl GpuCanvasRenderer for Inner {
     fn render(&mut self, frame: &mut GpuCanvasFrame<'_>) {
-        let Some(ready) = self.pipeline(frame) else {
+        // Split the borrow: the pipeline is built from `params` and then
+        // drawn alongside it.
+        let params = &self.params;
+        let Some(ready) = self.pipeline.ready(&self.source, params, frame) else {
             return;
         };
         let uniforms = EffectUniforms::from_frame(frame);
@@ -331,6 +386,8 @@ impl GpuCanvasRenderer for Inner {
             std::mem::size_of_val(&viewport) as u64,
             viewport.as_ptr() as *const _,
         );
+        let params = params.bytes();
+        encoder.set_fragment_bytes(2, params.len() as u64, params.as_ptr() as *const _);
         encoder.set_fragment_texture(0, Some(frame.backdrop.unwrap_or(&ready.blank)));
         encoder.set_fragment_sampler_state(0, Some(&ready.sampler));
         encoder.draw_primitives(metal::MTLPrimitiveType::Triangle, 0, 6);
@@ -353,10 +410,38 @@ mod tests {
         };
         let effect =
             "float4 effect(float2 uv, constant EffectUniforms &u) { return float4(uv, 0, 1); }";
-        let source = format!("{PREAMBLE}\n{effect}\n{}", fragment_entry(effect));
+        let uniforms = fragment_argument(&device, effect, &ParamLayout::empty(), "u");
+        assert_eq!(
+            uniforms.buffer_data_size() as usize,
+            std::mem::size_of::<EffectUniforms>()
+        );
+        let metal_offset = member_offsets(&uniforms);
+        let expected = [
+            ("resolution", offset_of!(EffectUniforms, resolution)),
+            ("pointer", offset_of!(EffectUniforms, pointer)),
+            ("origin", offset_of!(EffectUniforms, origin)),
+            ("time", offset_of!(EffectUniforms, time)),
+            ("scale", offset_of!(EffectUniforms, scale)),
+            ("has_pointer", offset_of!(EffectUniforms, has_pointer)),
+            ("_pad0", offset_of!(EffectUniforms, _pad)),
+            ("corner_radii", offset_of!(EffectUniforms, corner_radii)),
+        ];
+        for (name, rust_offset) in expected {
+            assert_eq!(metal_offset(name), rust_offset, "offset of `{name}`");
+        }
+    }
+
+    /// Compile `effect` with `params` and return the fragment argument
+    /// named `name`, with Metal's own view of its layout.
+    fn fragment_argument(
+        device: &metal::Device,
+        effect: &str,
+        params: &ParamLayout,
+        name: &str,
+    ) -> metal::Argument {
         let library = device
-            .new_library_with_source(&source, &metal::CompileOptions::new())
-            .expect("preamble compiles");
+            .new_library_with_source(&full_source(effect, params), &metal::CompileOptions::new())
+            .expect("source compiles");
         let descriptor = metal::RenderPipelineDescriptor::new();
         descriptor.set_vertex_function(Some(&library.get_function("effect_vertex", None).unwrap()));
         descriptor.set_fragment_function(Some(
@@ -373,37 +458,72 @@ mod tests {
                 metal::MTLPipelineOption::ArgumentInfo | metal::MTLPipelineOption::BufferTypeInfo,
             )
             .expect("pipeline builds");
-
         let arguments = reflection.fragment_arguments();
-        let uniforms = (0..arguments.count())
+        (0..arguments.count())
             .filter_map(|i| arguments.object_at(i))
-            .find(|a| a.name() == "u")
-            .expect("fragment argument `u`");
-        assert_eq!(
-            uniforms.buffer_data_size() as usize,
-            std::mem::size_of::<EffectUniforms>()
-        );
+            .find(|a| a.name() == name)
+            .unwrap_or_else(|| panic!("fragment argument `{name}`"))
+            .to_owned()
+    }
 
-        let members = uniforms.buffer_struct_type().members();
-        let metal_offset = |name: &str| -> usize {
+    fn member_offsets(argument: &metal::Argument) -> impl Fn(&str) -> usize {
+        let members = argument.buffer_struct_type().members();
+        move |name: &str| {
             (0..members.count())
                 .filter_map(|i| members.object_at(i))
                 .find(|m| m.name() == name)
                 .unwrap_or_else(|| panic!("MSL struct has no member `{name}`"))
                 .offset() as usize
+        }
+    }
+
+    /// The pure-Rust layout must agree with Metal for every type, in an
+    /// order that exercises float3 and float2 padding.
+    #[test]
+    fn metal_param_offsets_match_layout() {
+        let Some(device) = metal::Device::system_default() else {
+            eprintln!("no Metal device; skipping");
+            return;
         };
-        let expected = [
-            ("resolution", offset_of!(EffectUniforms, resolution)),
-            ("pointer", offset_of!(EffectUniforms, pointer)),
-            ("origin", offset_of!(EffectUniforms, origin)),
-            ("time", offset_of!(EffectUniforms, time)),
-            ("scale", offset_of!(EffectUniforms, scale)),
-            ("has_pointer", offset_of!(EffectUniforms, has_pointer)),
-            ("_pad0", offset_of!(EffectUniforms, _pad)),
-            ("corner_radii", offset_of!(EffectUniforms, corner_radii)),
+        let layout = ParamLayout::new(&[
+            ("a", Param::Float),
+            ("b", Param::Float3),
+            ("c", Param::Float),
+            ("d", Param::Float2),
+            ("e", Param::Float4),
+            ("f", Param::Int),
+        ])
+        .unwrap();
+        let effect = "float4 effect(float2 uv, constant EffectUniforms &u, constant EffectParams &p) { return p.e + p.a; }";
+        let argument = fragment_argument(&device, effect, &layout, "p");
+        assert_eq!(argument.buffer_data_size() as usize, layout.size());
+        let metal_offset = member_offsets(&argument);
+        for field in layout.fields() {
+            assert_eq!(
+                metal_offset(&field.name),
+                field.offset,
+                "offset of `{}`",
+                field.name
+            );
+        }
+    }
+
+    #[test]
+    fn fragment_entry_picks_params_call() {
+        let cases = [
+            (
+                "float4 effect(float2 uv, constant EffectUniforms &u)",
+                "effect(in.uv, u);",
+            ),
+            ("... EffectBackdrop b)", "effect(in.uv, u, backdrop);"),
+            ("... constant EffectParams &p)", "effect(in.uv, u, p);"),
+            (
+                "... EffectBackdrop b, constant EffectParams &p)",
+                "effect(in.uv, u, backdrop, p);",
+            ),
         ];
-        for (name, rust_offset) in expected {
-            assert_eq!(metal_offset(name), rust_offset, "offset of `{name}`");
+        for (source, call) in cases {
+            assert!(fragment_entry(source).contains(call), "{source}");
         }
     }
 
@@ -426,7 +546,7 @@ mod tests {
         };
         let effect = "float4 effect(float2 uv, constant EffectUniforms &u, EffectBackdrop b) { return b.sample(uv); }";
         assert!(fragment_entry(effect).contains("effect(in.uv, u, backdrop)"));
-        let source = format!("{PREAMBLE}\n{effect}\n{}", fragment_entry(effect));
+        let source = full_source(effect, &ParamLayout::empty());
         let library = device
             .new_library_with_source(&source, &metal::CompileOptions::new())
             .expect("backdrop preamble compiles");
@@ -442,7 +562,7 @@ mod tests {
             return;
         };
         let effect = crate::glsl_to_msl(include_str!("../examples/shaders/crt.glsl"));
-        let source = format!("{PREAMBLE}\n{effect}\n{}", fragment_entry(&effect));
+        let source = full_source(&effect, &ParamLayout::empty());
         device
             .new_library_with_source(&source, &metal::CompileOptions::new())
             .expect("crt.glsl compiles");
