@@ -20,8 +20,7 @@ struct Crt {
 }
 
 impl Render for Crt {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        window.request_animation_frame();
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.started.elapsed();
         let lines = [
             "$ cargo run --example crt",
@@ -77,7 +76,7 @@ impl Render for Crt {
                 div()
                     .absolute()
                     .inset_0()
-                    .child(self.overlay.element(t).size_full())
+                    .child(self.overlay.element(t).animate().size_full())
             }))
     }
 }

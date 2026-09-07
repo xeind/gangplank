@@ -37,5 +37,5 @@ fn element_lays_out_at_requested_size(cx: &mut TestAppContext) {
 #[test]
 fn uniform_block_is_sixteen_byte_aligned() {
     // Metal pads float2/float3 members; the Rust struct must match the MSL layout.
-    assert_eq!(std::mem::size_of::<gangplank_gpu::EffectUniforms>(), 48);
+    assert_eq!(std::mem::size_of::<gangplank_gpu::EffectUniforms>(), 64);
 }

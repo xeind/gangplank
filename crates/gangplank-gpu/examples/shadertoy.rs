@@ -46,8 +46,7 @@ impl Runner {
 }
 
 impl Render for Runner {
-    fn render(&mut self, window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        window.request_animation_frame();
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.started.elapsed();
         div()
             .flex()
@@ -59,7 +58,7 @@ impl Render for Runner {
                 div()
                     .flex_1()
                     .overflow_hidden()
-                    .children(self.effect.as_ref().map(|e| e.element(t).size_full())),
+                    .children(self.effect.as_ref().map(|e| e.element(t).animate().size_full())),
             )
             .child(div().p_2().text_sm().child(self.status.clone()))
     }

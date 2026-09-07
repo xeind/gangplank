@@ -25,8 +25,7 @@ struct Demo {
 }
 
 impl Render for Demo {
-    fn render(&mut self, window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        window.request_animation_frame();
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         let elapsed = self.started.elapsed();
 
         div()
@@ -46,7 +45,7 @@ impl Render for Demo {
                     .overflow_hidden()
                     .border_2()
                     .border_color(rgb(0x8888ff))
-                    .child(self.plasma.element(elapsed).size_full()),
+                    .child(self.plasma.element(elapsed).animate().size_full()),
             )
             .child(div().text_sm().text_color(rgb(0xaaaaaa)).child(format!(
                 "t = {:.1}s. Move the pointer over it.",

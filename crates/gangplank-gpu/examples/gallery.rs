@@ -88,8 +88,7 @@ struct Gallery {
 }
 
 impl Render for Gallery {
-    fn render(&mut self, window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        window.request_animation_frame();
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.started.elapsed();
 
         div()
@@ -123,7 +122,7 @@ impl Render for Gallery {
                                     .overflow_hidden()
                                     .border_1()
                                     .border_color(rgb(0x333333))
-                                    .child(effect.element(t).size_full()),
+                                    .child(effect.element(t).animate().size_full().rounded_lg()),
                             )
                             .child(div().text_sm().text_color(rgb(0x999999)).child(*label))
                     })),

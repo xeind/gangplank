@@ -21,6 +21,9 @@ pub struct EffectUniforms {
     /// `1.0` while the pointer is over the element, else `0.0`.
     pub has_pointer: f32,
     _pad: [f32; 3],
+    /// Corner radii in device pixels: top-left, top-right, bottom-right,
+    /// bottom-left. The wrapper fades the effect out past them.
+    pub corner_radii: [f32; 4],
 }
 
 impl EffectUniforms {
@@ -43,6 +46,12 @@ impl EffectUniforms {
             scale: frame.scale_factor,
             has_pointer: if pointer.is_some() { 1. } else { 0. },
             _pad: [0.; 3],
+            corner_radii: [
+                frame.corner_radii.top_left,
+                frame.corner_radii.top_right,
+                frame.corner_radii.bottom_right,
+                frame.corner_radii.bottom_left,
+            ],
         }
     }
 }
@@ -60,7 +69,12 @@ struct EffectUniforms {
     float time;
     float scale;
     float has_pointer;
-    float3 _pad;
+    // Three scalars, not float3: float3 aligns to 16 and would push
+    // corner_radii past the 64 bytes Rust uploads.
+    float _pad0;
+    float _pad1;
+    float _pad2;
+    float4 corner_radii;
 };
 
 struct EffectVertex {
@@ -84,9 +98,25 @@ vertex EffectVertex effect_vertex(uint vid [[vertex_id]],
 
 float4 effect(float2 uv, constant EffectUniforms &u);
 
+// Coverage of a rounded rectangle at pixel `p`: 1 inside, 0 outside, with a
+// one-pixel ramp at the edge. Radii order matches EffectUniforms.
+float effect_corner_coverage(float2 p, float2 size, float4 radii) {
+    float2 half_size = size * 0.5;
+    float2 q = p - half_size;
+    float r = q.x < 0.0 ? (q.y < 0.0 ? radii.x : radii.w)
+                        : (q.y < 0.0 ? radii.y : radii.z);
+    float2 d = abs(q) - half_size + r;
+    float sdf = length(max(d, 0.0)) + min(max(d.x, d.y), 0.0) - r;
+    return saturate(0.5 - sdf);
+}
+
 fragment float4 effect_fragment(EffectVertex in [[stage_in]],
                                 constant EffectUniforms &u [[buffer(0)]]) {
-    return effect(in.uv, u);
+    float4 color = effect(in.uv, u);
+    if (any(u.corner_radii > 0.0)) {
+        color *= effect_corner_coverage(in.uv * u.resolution, u.resolution, u.corner_radii);
+    }
+    return color;
 }
 "#;
 
@@ -102,7 +132,9 @@ struct Inner {
 }
 
 /// One fragment shader, drawn as a GPUI element. Cheap to clone; clones share
-/// the compiled pipeline.
+/// the compiled pipeline. Style the element with `.rounded_*()` and the
+/// effect fades out past the corners; call `.animate()` on it when the
+/// shader depends on time.
 ///
 /// The source must define
 /// `float4 effect(float2 uv, constant EffectUniforms &u)`. `uv` runs 0..1
@@ -210,5 +242,76 @@ impl GpuCanvasRenderer for Inner {
             &uniforms as *const EffectUniforms as *const _,
         );
         encoder.draw_primitives(metal::MTLPrimitiveType::Triangle, 0, 6);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::mem::offset_of;
+
+    /// Compile the preamble and ask Metal where it put each member of
+    /// `EffectUniforms`. A size pin alone let a `float3` alignment bug
+    /// through: the struct was still 64 bytes while `corner_radii` had moved.
+    #[test]
+    fn metal_uniform_offsets_match_rust() {
+        let Some(device) = metal::Device::system_default() else {
+            eprintln!("no Metal device; skipping");
+            return;
+        };
+        let source = format!(
+            "{PREAMBLE}\nfloat4 effect(float2 uv, constant EffectUniforms &u) {{ return float4(uv, 0, 1); }}"
+        );
+        let library = device
+            .new_library_with_source(&source, &metal::CompileOptions::new())
+            .expect("preamble compiles");
+        let descriptor = metal::RenderPipelineDescriptor::new();
+        descriptor.set_vertex_function(Some(&library.get_function("effect_vertex", None).unwrap()));
+        descriptor.set_fragment_function(Some(
+            &library.get_function("effect_fragment", None).unwrap(),
+        ));
+        descriptor
+            .color_attachments()
+            .object_at(0)
+            .unwrap()
+            .set_pixel_format(metal::MTLPixelFormat::BGRA8Unorm);
+        let (_, reflection) = device
+            .new_render_pipeline_state_with_reflection(
+                &descriptor,
+                metal::MTLPipelineOption::ArgumentInfo | metal::MTLPipelineOption::BufferTypeInfo,
+            )
+            .expect("pipeline builds");
+
+        let arguments = reflection.fragment_arguments();
+        let uniforms = (0..arguments.count())
+            .filter_map(|i| arguments.object_at(i))
+            .find(|a| a.name() == "u")
+            .expect("fragment argument `u`");
+        assert_eq!(
+            uniforms.buffer_data_size() as usize,
+            std::mem::size_of::<EffectUniforms>()
+        );
+
+        let members = uniforms.buffer_struct_type().members();
+        let metal_offset = |name: &str| -> usize {
+            (0..members.count())
+                .filter_map(|i| members.object_at(i))
+                .find(|m| m.name() == name)
+                .unwrap_or_else(|| panic!("MSL struct has no member `{name}`"))
+                .offset() as usize
+        };
+        let expected = [
+            ("resolution", offset_of!(EffectUniforms, resolution)),
+            ("pointer", offset_of!(EffectUniforms, pointer)),
+            ("origin", offset_of!(EffectUniforms, origin)),
+            ("time", offset_of!(EffectUniforms, time)),
+            ("scale", offset_of!(EffectUniforms, scale)),
+            ("has_pointer", offset_of!(EffectUniforms, has_pointer)),
+            ("_pad0", offset_of!(EffectUniforms, _pad)),
+            ("corner_radii", offset_of!(EffectUniforms, corner_radii)),
+        ];
+        for (name, rust_offset) in expected {
+            assert_eq!(metal_offset(name), rust_offset, "offset of `{name}`");
+        }
     }
 }
