@@ -15,5 +15,7 @@
 //! ```
 
 mod effect;
+mod shadertoy;
 
 pub use effect::{Effect, EffectUniforms};
+pub use shadertoy::glsl_to_msl;

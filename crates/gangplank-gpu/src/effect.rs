@@ -106,7 +106,8 @@ struct Inner {
 ///
 /// The source must define
 /// `float4 effect(float2 uv, constant EffectUniforms &u)`. `uv` runs 0..1
-/// across the element, top-left origin.
+/// across the element, top-left origin. The result is premultiplied alpha,
+/// composited over whatever GPUI drew below; return alpha 1 for opaque.
 #[derive(Clone)]
 pub struct Effect(Rc<RefCell<Inner>>);
 
@@ -118,6 +119,12 @@ impl Effect {
             source: source.into(),
             pipeline: Pipeline::Pending,
         })))
+    }
+
+    /// Wrap a Shadertoy or Ghostty style GLSL shader. See [`crate::glsl_to_msl`]
+    /// for what is and is not translated.
+    pub fn shadertoy(glsl: &str) -> Self {
+        Self::new(crate::glsl_to_msl(glsl))
     }
 
     /// The element for this frame. `time` is whatever clock the caller owns.
@@ -157,11 +164,20 @@ fn build_pipeline(
     let descriptor = metal::RenderPipelineDescriptor::new();
     descriptor.set_vertex_function(Some(&vertex));
     descriptor.set_fragment_function(Some(&fragment));
-    descriptor
+    let color = descriptor
         .color_attachments()
         .object_at(0)
-        .ok_or("no color attachment slot")?
-        .set_pixel_format(frame.color_format);
+        .ok_or("no color attachment slot")?;
+    color.set_pixel_format(frame.color_format);
+    // Source-over with premultiplied alpha, same as GPUI's own quads, so an
+    // effect that returns alpha < 1 composites over what is already drawn.
+    color.set_blending_enabled(true);
+    color.set_rgb_blend_operation(metal::MTLBlendOperation::Add);
+    color.set_alpha_blend_operation(metal::MTLBlendOperation::Add);
+    color.set_source_rgb_blend_factor(metal::MTLBlendFactor::One);
+    color.set_source_alpha_blend_factor(metal::MTLBlendFactor::One);
+    color.set_destination_rgb_blend_factor(metal::MTLBlendFactor::OneMinusSourceAlpha);
+    color.set_destination_alpha_blend_factor(metal::MTLBlendFactor::OneMinusSourceAlpha);
     frame.device.new_render_pipeline_state(&descriptor)
 }
 
