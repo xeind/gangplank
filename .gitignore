@@ -8,3 +8,6 @@ CLAUDE.md
 crates/gangplank/CLAUDE.md
 docs/
 crates/gangplank/docs/
+
+# personal per-directory env (CODEX_HOME), never committed
+mise.local.toml
