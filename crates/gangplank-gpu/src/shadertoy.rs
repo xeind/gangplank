@@ -6,9 +6,14 @@
 //! per-draw globals, so the source is wrapped in a struct that holds the
 //! uniforms; every helper becomes a member and sees `iTime` as `u.time`.
 //!
-//! Not covered: `iChannel0..3` textures (Ghostty's terminal image), `iDate`,
-//! `mat2(a, b, c, d)` scalar constructors, and GLSL-only builtins. Those
-//! surface as a Metal compile error in the log.
+//! `iChannel0` is what GPUI drew under the element, Ghostty's terminal
+//! image, when the element asked for it with `.backdrop(margin)`; otherwise
+//! it samples transparent black. `texture(iChannel0, uv)` takes Shadertoy's
+//! bottom-left uv.
+//!
+//! Not covered: `iChannel1..3`, `iDate`, `mat2(a, b, c, d)` scalar
+//! constructors, and GLSL-only builtins. Those surface as a Metal compile
+//! error in the log.
 
 use regex::Regex;
 use std::sync::OnceLock;
@@ -16,7 +21,9 @@ use std::sync::OnceLock;
 /// GLSL to MSL. The result defines `effect(uv, u)` as [`crate::Effect`] needs.
 pub fn glsl_to_msl(glsl: &str) -> String {
     let body = rewrite_body(glsl);
-    format!("{PRELUDE}\nstruct Shadertoy {{\n    constant EffectUniforms &u;\n{body}\n}};\n{ENTRY}")
+    format!(
+        "{PRELUDE}\nstruct Shadertoy {{\n    constant EffectUniforms &u;\n    EffectBackdrop backdrop;\n{body}\n}};\n{ENTRY}"
+    )
 }
 
 fn rewrite_body(glsl: &str) -> String {
@@ -72,11 +79,16 @@ inline float2 atan(float2 y, float2 x) { return atan2(y, x); }
 #define iMouse (u.has_pointer > 0.5 \
     ? float4(u.pointer.x, u.resolution.y - u.pointer.y, 0.0, 0.0) \
     : float4(0.0))
+#define iChannel0 (backdrop)
+// GLSL `texture(iChannel0, uv)`, uv with a bottom-left origin.
+inline float4 texture(EffectBackdrop b, float2 uv) {
+    return b.sample(float2(uv.x, 1.0 - uv.y));
+}
 "#;
 
 const ENTRY: &str = r#"
-float4 effect(float2 uv, constant EffectUniforms &u) {
-    Shadertoy s{u};
+float4 effect(float2 uv, constant EffectUniforms &u, EffectBackdrop backdrop) {
+    Shadertoy s{u, backdrop};
     float4 color = float4(0.0, 0.0, 0.0, 1.0);
     // Shadertoy's fragCoord has its origin at the bottom-left.
     float2 fragCoord = float2(uv.x, 1.0 - uv.y) * u.resolution;
@@ -98,5 +110,6 @@ mod tests {
         assert!(msl.contains("void mainImage(thread vec4 &fragColor, vec2 fragCoord)"));
         assert!(msl.contains("struct Shadertoy {"));
         assert!(msl.contains("s.mainImage(color, fragCoord);"));
+        assert!(msl.contains("EffectBackdrop backdrop;"));
     }
 }

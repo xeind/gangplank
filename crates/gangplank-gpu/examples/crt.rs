@@ -1,8 +1,9 @@
 //! A CRT overlay on top of ordinary GPUI widgets. Run with `cargo run --example crt`.
 //!
-//! The overlay is `examples/shaders/crt.glsl`, a Shadertoy style shader that
-//! returns alpha, drawn absolutely over a fake terminal-ish app. The widgets
-//! below it stay interactive: hover the rows.
+//! The overlay is `examples/shaders/crt.glsl`, a Shadertoy style shader drawn
+//! absolutely over a fake terminal-ish app. It reads the widgets under it as
+//! `iChannel0` and redraws them curved and fringed. The widgets stay
+//! interactive: hover the rows.
 
 use gangplank_gpu::Effect;
 use gpui::{
@@ -73,10 +74,13 @@ impl Render for Crt {
                     ),
             )
             .children(self.enabled.then(|| {
-                div()
-                    .absolute()
-                    .inset_0()
-                    .child(self.overlay.element(t).animate().size_full())
+                div().absolute().inset_0().child(
+                    self.overlay
+                        .element(t)
+                        .animate()
+                        .backdrop(px(4.))
+                        .size_full(),
+                )
             }))
     }
 }

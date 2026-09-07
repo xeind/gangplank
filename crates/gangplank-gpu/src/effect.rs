@@ -56,8 +56,8 @@ impl EffectUniforms {
     }
 }
 
-/// Metal source that wraps the user's `effect` function. Must stay in step
-/// with [`EffectUniforms`].
+/// Metal source that precedes the user's `effect` function. Must stay in
+/// step with [`EffectUniforms`].
 const PREAMBLE: &str = r#"
 #include <metal_stdlib>
 using namespace metal;
@@ -75,6 +75,22 @@ struct EffectUniforms {
     float _pad1;
     float _pad2;
     float4 corner_radii;
+};
+
+// What GPUI drew under the element, when the element asked for it with
+// `.backdrop(margin)`. Without that it is a 1x1 transparent texture.
+struct EffectBackdrop {
+    texture2d<float> texture;
+    sampler s;
+    float2 viewport;    // drawable size, device pixels
+    float2 origin;      // element origin in the drawable, device pixels
+    float2 resolution;  // element size, device pixels
+    // Sample at element uv, 0..1 with a top-left origin. Values past the
+    // requested margin are undefined: the copy is regional and the texture
+    // is never cleared.
+    float4 sample(float2 uv) {
+        return texture.sample(s, (origin + uv * resolution) / viewport);
+    }
 };
 
 struct EffectVertex {
@@ -96,8 +112,6 @@ vertex EffectVertex effect_vertex(uint vid [[vertex_id]],
     return out;
 }
 
-float4 effect(float2 uv, constant EffectUniforms &u);
-
 // Coverage of a rounded rectangle at pixel `p`: 1 inside, 0 outside, with a
 // one-pixel ramp at the edge. Radii order matches EffectUniforms.
 float effect_corner_coverage(float2 p, float2 size, float4 radii) {
@@ -109,26 +123,52 @@ float effect_corner_coverage(float2 p, float2 size, float4 radii) {
     float sdf = length(max(d, 0.0)) + min(max(d.x, d.y), 0.0) - r;
     return saturate(0.5 - sdf);
 }
-
-fragment float4 effect_fragment(EffectVertex in [[stage_in]],
-                                constant EffectUniforms &u [[buffer(0)]]) {
-    float4 color = effect(in.uv, u);
-    if (any(u.corner_radii > 0.0)) {
-        color *= effect_corner_coverage(in.uv * u.resolution, u.resolution, u.corner_radii);
-    }
-    return color;
-}
 "#;
+
+/// The fragment entry, after the user's source so it can call `effect`.
+/// `EffectBackdrop` in the source selects the three-argument form.
+fn fragment_entry(source: &str) -> String {
+    let call = if source.contains("EffectBackdrop") {
+        "effect(in.uv, u, backdrop)"
+    } else {
+        "effect(in.uv, u)"
+    };
+    format!(
+        r#"
+fragment float4 effect_fragment(EffectVertex in [[stage_in]],
+                                constant EffectUniforms &u [[buffer(0)]],
+                                constant float2 &viewport [[buffer(1)]],
+                                texture2d<float> backdrop_texture [[texture(0)]],
+                                sampler backdrop_sampler [[sampler(0)]]) {{
+    EffectBackdrop backdrop {{ backdrop_texture, backdrop_sampler, viewport, u.origin, u.resolution }};
+    float4 color = {call};
+    if (any(u.corner_radii > 0.0)) {{
+        color *= effect_corner_coverage(in.uv * u.resolution, u.resolution, u.corner_radii);
+    }}
+    return color;
+}}
+"#
+    )
+}
+
+struct Ready {
+    pipeline: metal::RenderPipelineState,
+    sampler: metal::SamplerState,
+    /// Bound when the frame carries no backdrop, so sampling stays defined.
+    blank: metal::Texture,
+}
 
 enum Pipeline {
     Pending,
-    Ready(metal::RenderPipelineState),
+    Ready(Ready),
     Failed,
 }
 
 struct Inner {
     source: String,
     pipeline: Pipeline,
+    /// The shader reads the pointer, so the element follows it.
+    reads_pointer: bool,
 }
 
 /// One fragment shader, drawn as a GPUI element. Cheap to clone; clones share
@@ -140,6 +180,12 @@ struct Inner {
 /// `float4 effect(float2 uv, constant EffectUniforms &u)`. `uv` runs 0..1
 /// across the element, top-left origin. The result is premultiplied alpha,
 /// composited over whatever GPUI drew below; return alpha 1 for opaque.
+///
+/// To read what GPUI drew under the element, define
+/// `float4 effect(float2 uv, constant EffectUniforms &u, EffectBackdrop backdrop)`
+/// instead and call `.backdrop(margin)` on the element. `backdrop.sample(uv)`
+/// returns the pixel under element uv; `margin` is how far past the element
+/// the copy reaches, for samples near the edge.
 #[derive(Clone)]
 pub struct Effect(Rc<RefCell<Inner>>);
 
@@ -150,26 +196,41 @@ impl Effect {
         Effect(Rc::new(RefCell::new(Inner {
             source: source.into(),
             pipeline: Pipeline::Pending,
+            reads_pointer: false,
         })))
     }
 
     /// Wrap a Shadertoy or Ghostty style GLSL shader. See [`crate::glsl_to_msl`]
-    /// for what is and is not translated.
+    /// for what is and is not translated. A shader that mentions `iMouse`
+    /// gets `.follow_pointer()` on its element without being asked.
     pub fn shadertoy(glsl: &str) -> Self {
-        Self::new(crate::glsl_to_msl(glsl))
+        let effect = Self::new(crate::glsl_to_msl(glsl));
+        effect.0.borrow_mut().reads_pointer = glsl.contains("iMouse");
+        effect
     }
 
     /// The element for this frame. `time` is whatever clock the caller owns.
+    /// Call `.follow_pointer()` on it when an MSL shader reads `u.pointer`.
     pub fn element(&self, time: Duration) -> GpuCanvas {
-        gpu_canvas(self.0.clone()).time(time)
+        let canvas = gpu_canvas(self.0.clone()).time(time);
+        if self.0.borrow().reads_pointer {
+            canvas.follow_pointer()
+        } else {
+            canvas
+        }
+    }
+
+    #[cfg(test)]
+    fn reads_pointer(&self) -> bool {
+        self.0.borrow().reads_pointer
     }
 }
 
 impl Inner {
-    fn pipeline(&mut self, frame: &GpuCanvasFrame<'_>) -> Option<metal::RenderPipelineState> {
+    fn pipeline(&mut self, frame: &GpuCanvasFrame<'_>) -> Option<&Ready> {
         if let Pipeline::Pending = self.pipeline {
             self.pipeline = match build_pipeline(&self.source, frame) {
-                Ok(state) => Pipeline::Ready(state),
+                Ok(ready) => Pipeline::Ready(ready),
                 Err(err) => {
                     log::error!("gangplank-gpu: effect failed to compile: {err}");
                     Pipeline::Failed
@@ -177,17 +238,14 @@ impl Inner {
             };
         }
         match &self.pipeline {
-            Pipeline::Ready(state) => Some(state.clone()),
+            Pipeline::Ready(ready) => Some(ready),
             _ => None,
         }
     }
 }
 
-fn build_pipeline(
-    source: &str,
-    frame: &GpuCanvasFrame<'_>,
-) -> Result<metal::RenderPipelineState, String> {
-    let full = format!("{PREAMBLE}\n{source}");
+fn build_pipeline(source: &str, frame: &GpuCanvasFrame<'_>) -> Result<Ready, String> {
+    let full = format!("{PREAMBLE}\n{source}\n{}", fragment_entry(source));
     let library = frame
         .device
         .new_library_with_source(&full, &metal::CompileOptions::new())?;
@@ -210,12 +268,39 @@ fn build_pipeline(
     color.set_source_alpha_blend_factor(metal::MTLBlendFactor::One);
     color.set_destination_rgb_blend_factor(metal::MTLBlendFactor::OneMinusSourceAlpha);
     color.set_destination_alpha_blend_factor(metal::MTLBlendFactor::OneMinusSourceAlpha);
-    frame.device.new_render_pipeline_state(&descriptor)
+    let pipeline = frame.device.new_render_pipeline_state(&descriptor)?;
+
+    let sampler = metal::SamplerDescriptor::new();
+    sampler.set_min_filter(metal::MTLSamplerMinMagFilter::Linear);
+    sampler.set_mag_filter(metal::MTLSamplerMinMagFilter::Linear);
+    sampler.set_address_mode_s(metal::MTLSamplerAddressMode::ClampToEdge);
+    sampler.set_address_mode_t(metal::MTLSamplerAddressMode::ClampToEdge);
+    let sampler = frame.device.new_sampler(&sampler);
+
+    let blank = metal::TextureDescriptor::new();
+    blank.set_width(1);
+    blank.set_height(1);
+    blank.set_pixel_format(frame.color_format);
+    blank.set_usage(metal::MTLTextureUsage::ShaderRead);
+    let blank = frame.device.new_texture(&blank);
+    let zero = [0u8; 4];
+    blank.replace_region(
+        metal::MTLRegion::new_2d(0, 0, 1, 1),
+        0,
+        zero.as_ptr() as *const _,
+        4,
+    );
+
+    Ok(Ready {
+        pipeline,
+        sampler,
+        blank,
+    })
 }
 
 impl GpuCanvasRenderer for Inner {
     fn render(&mut self, frame: &mut GpuCanvasFrame<'_>) {
-        let Some(pipeline) = self.pipeline(frame) else {
+        let Some(ready) = self.pipeline(frame) else {
             return;
         };
         let uniforms = EffectUniforms::from_frame(frame);
@@ -225,7 +310,7 @@ impl GpuCanvasRenderer for Inner {
         ];
 
         let encoder = frame.encoder;
-        encoder.set_render_pipeline_state(&pipeline);
+        encoder.set_render_pipeline_state(&ready.pipeline);
         encoder.set_vertex_bytes(
             0,
             std::mem::size_of::<EffectUniforms>() as u64,
@@ -241,6 +326,13 @@ impl GpuCanvasRenderer for Inner {
             std::mem::size_of::<EffectUniforms>() as u64,
             &uniforms as *const EffectUniforms as *const _,
         );
+        encoder.set_fragment_bytes(
+            1,
+            std::mem::size_of_val(&viewport) as u64,
+            viewport.as_ptr() as *const _,
+        );
+        encoder.set_fragment_texture(0, Some(frame.backdrop.unwrap_or(&ready.blank)));
+        encoder.set_fragment_sampler_state(0, Some(&ready.sampler));
         encoder.draw_primitives(metal::MTLPrimitiveType::Triangle, 0, 6);
     }
 }
@@ -259,9 +351,9 @@ mod tests {
             eprintln!("no Metal device; skipping");
             return;
         };
-        let source = format!(
-            "{PREAMBLE}\nfloat4 effect(float2 uv, constant EffectUniforms &u) {{ return float4(uv, 0, 1); }}"
-        );
+        let effect =
+            "float4 effect(float2 uv, constant EffectUniforms &u) { return float4(uv, 0, 1); }";
+        let source = format!("{PREAMBLE}\n{effect}\n{}", fragment_entry(effect));
         let library = device
             .new_library_with_source(&source, &metal::CompileOptions::new())
             .expect("preamble compiles");
@@ -313,5 +405,46 @@ mod tests {
         for (name, rust_offset) in expected {
             assert_eq!(metal_offset(name), rust_offset, "offset of `{name}`");
         }
+    }
+
+    /// GLSL that reads `iMouse` follows the pointer; MSL never does by itself.
+    #[test]
+    fn shadertoy_follows_pointer_only_when_it_reads_imouse() {
+        let reads = "void mainImage(out vec4 c, in vec2 p) { c = vec4(iMouse.x); }";
+        let ignores = "void mainImage(out vec4 c, in vec2 p) { c = vec4(iTime); }";
+        assert!(Effect::shadertoy(reads).reads_pointer());
+        assert!(!Effect::shadertoy(ignores).reads_pointer());
+        assert!(!Effect::new("float4 effect(float2 uv, constant EffectUniforms &u) { return float4(u.pointer, 0, 1); }").reads_pointer());
+    }
+
+    /// The three-argument form compiles and links against the wrapper.
+    #[test]
+    fn backdrop_effect_compiles() {
+        let Some(device) = metal::Device::system_default() else {
+            eprintln!("no Metal device; skipping");
+            return;
+        };
+        let effect = "float4 effect(float2 uv, constant EffectUniforms &u, EffectBackdrop b) { return b.sample(uv); }";
+        assert!(fragment_entry(effect).contains("effect(in.uv, u, backdrop)"));
+        let source = format!("{PREAMBLE}\n{effect}\n{}", fragment_entry(effect));
+        let library = device
+            .new_library_with_source(&source, &metal::CompileOptions::new())
+            .expect("backdrop preamble compiles");
+        library.get_function("effect_fragment", None).unwrap();
+    }
+
+    /// The CRT demo goes GLSL -> MSL and samples iChannel0; a translation
+    /// slip would otherwise show up only in the example's log.
+    #[test]
+    fn translated_crt_shader_compiles() {
+        let Some(device) = metal::Device::system_default() else {
+            eprintln!("no Metal device; skipping");
+            return;
+        };
+        let effect = crate::glsl_to_msl(include_str!("../examples/shaders/crt.glsl"));
+        let source = format!("{PREAMBLE}\n{effect}\n{}", fragment_entry(&effect));
+        device
+            .new_library_with_source(&source, &metal::CompileOptions::new())
+            .expect("crt.glsl compiles");
     }
 }
