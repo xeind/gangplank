@@ -189,6 +189,8 @@ fragment float4 effect_fragment(EffectVertex in [[stage_in]],
 enum Source {
     Msl(String),
     Wgsl(String),
+    /// Shadertoy style GLSL; the params come from its `uniform` lines.
+    Glsl(String),
 }
 
 impl Source {
@@ -201,6 +203,7 @@ impl Source {
             Source::Wgsl(wgsl) => READS_P
                 .get_or_init(|| regex::Regex::new(r"\bp\.").unwrap())
                 .is_match(wgsl),
+            Source::Glsl(glsl) => !crate::glsl_uniforms(glsl).is_empty(),
         }
     }
 
@@ -209,21 +212,40 @@ impl Source {
         match self {
             Source::Msl(_) => "EffectParams",
             Source::Wgsl(_) => "p",
+            Source::Glsl(_) => "a uniform",
         }
     }
 }
 
-/// What Metal compiles. MSL: preamble, params struct, user source, entry.
-/// WGSL: naga's translation of the user source plus the WGSL preamble.
-fn full_source(source: &Source, params: &ParamLayout) -> Result<String, String> {
-    match source {
-        Source::Msl(msl) => Ok(format!(
-            "{PREAMBLE}\n{}\n{msl}\n{}",
-            params.msl_struct(),
-            fragment_entry(msl)
-        )),
-        Source::Wgsl(wgsl) => crate::wgsl::wgsl_to_msl(wgsl, params),
-    }
+/// What Metal compiles, and the name of the fragment function in it. The
+/// vertex function is always `effect_vertex`.
+struct Translated {
+    msl: String,
+    fragment_entry: &'static str,
+}
+
+/// MSL: preamble, params struct, user source, entry. WGSL and GLSL: naga's
+/// translation of the user source inside the matching wrapper.
+fn full_source(source: &Source, params: &ParamLayout) -> Result<Translated, String> {
+    let (msl, fragment_entry) = match source {
+        Source::Msl(msl) => (
+            format!(
+                "{PREAMBLE}\n{}\n{msl}\n{}",
+                params.msl_struct(),
+                fragment_entry(msl)
+            ),
+            "effect_fragment",
+        ),
+        Source::Wgsl(wgsl) => (crate::wgsl::wgsl_to_msl(wgsl, params)?, "effect_fragment"),
+        Source::Glsl(glsl) => (
+            crate::shadertoy::glsl_to_msl(glsl, params)?,
+            crate::shadertoy::FRAGMENT_ENTRY,
+        ),
+    };
+    Ok(Translated {
+        msl,
+        fragment_entry,
+    })
 }
 
 struct Ready {
@@ -407,7 +429,7 @@ impl Effect {
     /// as [`Effect::set_source`] does. Its `uniform` declarations become the
     /// params, so earlier values reset.
     pub fn set_shadertoy(&self, glsl: &str) {
-        self.set_source(crate::glsl_to_msl(glsl));
+        self.replace_source(Source::Glsl(glsl.to_string()));
         let decls = crate::glsl_uniforms(glsl);
         let decls: Vec<(&str, Param)> = decls.iter().map(|(n, t)| (n.as_str(), *t)).collect();
         let mut inner = self.0.borrow_mut();
@@ -449,7 +471,7 @@ impl Effect {
         Ok(())
     }
 
-    /// Wrap a Shadertoy or Ghostty style GLSL shader. See [`crate::glsl_to_msl`]
+    /// Wrap a Shadertoy or Ghostty style GLSL shader. See `src/shadertoy.rs`
     /// for what is and is not translated. A shader that mentions `iMouse`
     /// gets `.follow_pointer()` on its element without being asked.
     pub fn shadertoy(glsl: &str) -> Self {
@@ -517,12 +539,12 @@ fn build_pipeline(
     params: &ParamLayout,
     frame: &GpuCanvasFrame<'_>,
 ) -> Result<Ready, String> {
-    let full = full_source(source, params)?;
+    let translated = full_source(source, params)?;
     let library = frame
         .device
-        .new_library_with_source(&full, &metal::CompileOptions::new())?;
+        .new_library_with_source(&translated.msl, &metal::CompileOptions::new())?;
     let vertex = library.get_function("effect_vertex", None)?;
-    let fragment = library.get_function("effect_fragment", None)?;
+    let fragment = library.get_function(translated.fragment_entry, None)?;
     let descriptor = metal::RenderPipelineDescriptor::new();
     descriptor.set_vertex_function(Some(&vertex));
     descriptor.set_fragment_function(Some(&fragment));
@@ -679,7 +701,12 @@ mod tests {
         };
         let effect =
             "float4 effect(float2 uv, constant EffectUniforms &u) { return float4(uv, 0, 1); }";
-        let uniforms = fragment_argument(&device, &msl(effect, &ParamLayout::empty()), "u");
+        let uniforms = fragment_argument(
+            &device,
+            &msl(effect, &ParamLayout::empty()),
+            "effect_fragment",
+            "u",
+        );
         assert_eq!(
             uniforms.buffer_data_size() as usize,
             std::mem::size_of::<EffectUniforms>()
@@ -704,20 +731,26 @@ mod tests {
 
     /// What Metal compiles for an MSL `effect` with `params`.
     fn msl(effect: &str, params: &ParamLayout) -> String {
-        full_source(&Source::Msl(effect.into()), params).unwrap()
+        full_source(&Source::Msl(effect.into()), params)
+            .unwrap()
+            .msl
     }
 
-    /// Compile `source` and return the fragment argument named `name`,
-    /// with Metal's own view of its layout.
-    fn fragment_argument(device: &metal::Device, source: &str, name: &str) -> metal::Argument {
+    /// Compile `source` and return the fragment argument named `name`, or
+    /// bound at `buffer(N)` when `name` is `"buffer(N)"`, with Metal's own
+    /// view of its layout.
+    fn fragment_argument(
+        device: &metal::Device,
+        source: &str,
+        entry: &str,
+        name: &str,
+    ) -> metal::Argument {
         let library = device
             .new_library_with_source(source, &metal::CompileOptions::new())
             .expect("source compiles");
         let descriptor = metal::RenderPipelineDescriptor::new();
         descriptor.set_vertex_function(Some(&library.get_function("effect_vertex", None).unwrap()));
-        descriptor.set_fragment_function(Some(
-            &library.get_function("effect_fragment", None).unwrap(),
-        ));
+        descriptor.set_fragment_function(Some(&library.get_function(entry, None).unwrap()));
         descriptor
             .color_attachments()
             .object_at(0)
@@ -730,9 +763,19 @@ mod tests {
             )
             .expect("pipeline builds");
         let arguments = reflection.fragment_arguments();
+        let index = name
+            .strip_prefix("buffer(")
+            .and_then(|n| n.strip_suffix(')'))
+            .and_then(|n| n.parse::<u64>().ok());
         (0..arguments.count())
             .filter_map(|i| arguments.object_at(i))
-            .find(|a| a.name() == name)
+            .find(|a| match index {
+                // `MTLArgumentType` is deprecated in favour of binding
+                // reflection, which the metal crate does not expose.
+                #[allow(deprecated)]
+                Some(index) => a.type_() == metal::MTLArgumentType::Buffer && a.index() == index,
+                None => a.name() == name,
+            })
             .unwrap_or_else(|| panic!("fragment argument `{name}`"))
             .to_owned()
     }
@@ -762,8 +805,13 @@ mod tests {
     }
 
     /// Metal's offsets for fragment argument `p` must equal `layout`'s.
-    fn assert_params_match(device: &metal::Device, source: &str, layout: &ParamLayout) {
-        let argument = fragment_argument(device, source, "p");
+    fn assert_params_match(
+        device: &metal::Device,
+        source: &str,
+        entry: &str,
+        layout: &ParamLayout,
+    ) {
+        let argument = fragment_argument(device, source, entry, "p");
         assert_eq!(argument.buffer_data_size() as usize, layout.size());
         let metal_offset = member_offsets(&argument);
         for field in layout.fields() {
@@ -785,7 +833,7 @@ mod tests {
         };
         let layout = awkward_layout();
         let effect = "float4 effect(float2 uv, constant EffectUniforms &u, constant EffectParams &p) { return p.e + p.a; }";
-        assert_params_match(&device, &msl(effect, &layout), &layout);
+        assert_params_match(&device, &msl(effect, &layout), "effect_fragment", &layout);
     }
 
     /// Naga lays out the WGSL preamble's structs; Metal must read them at
@@ -798,9 +846,11 @@ mod tests {
         };
         let layout = awkward_layout();
         let effect = "fn effect(uv: vec2<f32>) -> vec4<f32> { return p.e + p.a + u.corner_radii + u.time + f32(u.frame) + u.delta; }";
-        let source = full_source(&Source::Wgsl(effect.into()), &layout).unwrap();
-        assert_params_match(&device, &source, &layout);
-        let uniforms = fragment_argument(&device, &source, "u");
+        let source = full_source(&Source::Wgsl(effect.into()), &layout)
+            .unwrap()
+            .msl;
+        assert_params_match(&device, &source, "effect_fragment", &layout);
+        let uniforms = fragment_argument(&device, &source, "effect_fragment", "u");
         assert_eq!(
             uniforms.buffer_data_size() as usize,
             std::mem::size_of::<EffectUniforms>()
@@ -946,17 +996,70 @@ mod tests {
     }
 
     /// The CRT demo goes GLSL -> MSL and samples iChannel0; a translation
-    /// slip would otherwise show up only in the example's log.
+    /// slip would otherwise show up only in the example's log. Both entry
+    /// points must be in the one library.
     #[test]
     fn translated_crt_shader_compiles() {
         let Some(device) = metal::Device::system_default() else {
             eprintln!("no Metal device; skipping");
             return;
         };
-        let effect = crate::glsl_to_msl(include_str!("../examples/shaders/crt.glsl"));
-        let source = msl(&effect, &ParamLayout::empty());
-        device
-            .new_library_with_source(&source, &metal::CompileOptions::new())
+        let glsl = include_str!("../examples/shaders/crt.glsl");
+        let translated = full_source(&Source::Glsl(glsl.into()), &ParamLayout::empty()).unwrap();
+        let library = device
+            .new_library_with_source(&translated.msl, &metal::CompileOptions::new())
             .expect("crt.glsl compiles");
+        library.get_function("effect_vertex", None).unwrap();
+        library
+            .get_function(translated.fragment_entry, None)
+            .unwrap();
+    }
+
+    /// std140 with a pad after each vec3 must put every GLSL uniform where
+    /// the Rust layout uploads it, and the uniform block where Rust's is.
+    #[test]
+    fn metal_glsl_offsets_match_rust() {
+        let Some(device) = metal::Device::system_default() else {
+            eprintln!("no Metal device; skipping");
+            return;
+        };
+        let glsl = "uniform float a;\nuniform vec3 b;\nuniform float c;\nuniform vec2 d;\nuniform vec4 e;\nuniform int f;\nvoid mainImage(out vec4 o, in vec2 p) { o = e + a + c + vec4(b, 1.0) + vec4(d, 0.0, 0.0) + float(f) + iTime + float(iFrame) + iTimeDelta + vec4(iResolution, 0.0); }";
+        let layout = awkward_layout();
+        let translated = full_source(&Source::Glsl(glsl.into()), &layout).unwrap();
+        // The block is anonymous in GLSL, so naga's name for it is not
+        // stable; the slot is what render binds.
+        let params = fragment_argument(
+            &device,
+            &translated.msl,
+            translated.fragment_entry,
+            "buffer(2)",
+        );
+        assert_eq!(params.buffer_data_size() as usize, layout.size());
+        let metal_offset = member_offsets(&params);
+        for field in layout.fields() {
+            assert_eq!(
+                metal_offset(&field.name),
+                field.offset,
+                "offset of `{}`",
+                field.name
+            );
+        }
+        let uniforms = fragment_argument(
+            &device,
+            &translated.msl,
+            translated.fragment_entry,
+            "buffer(0)",
+        );
+        assert_eq!(
+            uniforms.buffer_data_size() as usize,
+            std::mem::size_of::<EffectUniforms>()
+        );
+        let metal_offset = member_offsets(&uniforms);
+        assert_eq!(metal_offset("delta"), offset_of!(EffectUniforms, delta));
+        assert_eq!(metal_offset("frame"), offset_of!(EffectUniforms, frame));
+        assert_eq!(
+            metal_offset("corner_radii"),
+            offset_of!(EffectUniforms, corner_radii)
+        );
     }
 }

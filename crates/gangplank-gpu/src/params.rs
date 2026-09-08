@@ -42,6 +42,17 @@ impl Param {
         }
     }
 
+    /// The GLSL type name.
+    pub fn glsl(self) -> &'static str {
+        match self {
+            Param::Float => "float",
+            Param::Float2 => "vec2",
+            Param::Float3 => "vec3",
+            Param::Float4 => "vec4",
+            Param::Int => "int",
+        }
+    }
+
     /// The WGSL type name.
     pub fn wgsl(self) -> &'static str {
         match self {
@@ -268,6 +279,22 @@ impl ParamLayout {
         out
     }
 
+    /// The same struct as a std140 GLSL uniform block at set 0, binding 2,
+    /// anonymous so its members are plain globals in the shader. A `vec3`
+    /// gets a pad float after it: std140 gives `vec3` 12 bytes where MSL's
+    /// `float3` takes 16, and the pad puts the next member where MSL has it.
+    pub(crate) fn glsl_block(&self) -> String {
+        let mut out = String::from("layout(std140, set = 0, binding = 2) uniform EffectParams {\n");
+        for field in &self.fields {
+            out.push_str(&format!("    {} {};\n", field.ty.glsl(), field.name));
+            if field.ty == Param::Float3 {
+                out.push_str(&format!("    float _pad_{};\n", field.name));
+            }
+        }
+        out.push_str("};\n");
+        out
+    }
+
     pub(crate) fn bytes(&self) -> &[u8] {
         &self.bytes
     }
@@ -334,6 +361,14 @@ mod tests {
         assert_eq!(
             awkward().wgsl_struct(),
             "struct EffectParams {\n    a: f32,\n    @size(16) b: vec3<f32>,\n    c: f32,\n    d: vec2<f32>,\n    e: vec4<f32>,\n    f: i32,\n};\n"
+        );
+    }
+
+    #[test]
+    fn glsl_block_pads_after_vec3() {
+        assert_eq!(
+            awkward().glsl_block(),
+            "layout(std140, set = 0, binding = 2) uniform EffectParams {\n    float a;\n    vec3 b;\n    float _pad_b;\n    float c;\n    vec2 d;\n    vec4 e;\n    int f;\n};\n"
         );
     }
 

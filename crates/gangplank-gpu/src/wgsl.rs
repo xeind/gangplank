@@ -97,7 +97,8 @@ fn effect_corner_coverage(pixel: vec2<f32>, size: vec2<f32>, radii: vec4<f32>) -
 
 /// Group and binding of each preamble global, and the Metal slot it lands
 /// in. Buffers 0..3, textures 0..4, samplers 0..1: the table in gpu.md.
-fn resources() -> EntryPointResources {
+/// The GLSL wrapper in `shadertoy.rs` declares the same set.
+pub(crate) fn resources() -> EntryPointResources {
     let mut resources = EntryPointResources::default();
     let mut bind = |group: u32, binding: u32, target: BindTarget| {
         resources

@@ -10,7 +10,7 @@ description = "Shader effects inside GPUI layout: a fragment shader as an elemen
 [dependencies]
 gpui = { package = "gpui-ce", version = "0.3" }
 log = "0.4"
-naga = { version = "25", features = ["wgsl-in", "msl-out"] }
+naga = { version = "25", features = ["glsl-in", "wgsl-in", "msl-out"] }
 regex = "1"
 
 [dev-dependencies]

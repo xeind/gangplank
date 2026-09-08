@@ -22,4 +22,4 @@ mod wgsl;
 
 pub use effect::{Effect, EffectUniforms, IMAGE_SLOTS, ImageError};
 pub use params::{Param, ParamError, ParamValue};
-pub use shadertoy::{glsl_to_msl, glsl_uniforms};
+pub use shadertoy::glsl_uniforms;
