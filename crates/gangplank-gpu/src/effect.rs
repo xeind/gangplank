@@ -94,6 +94,22 @@ struct EffectBackdrop {
     }
 };
 
+// App images, uploaded with `Effect::image(slot, ..)`. An empty slot is a
+// 1x1 transparent texture with size (0, 0).
+struct EffectImages {
+    array<texture2d<float>, 4> textures;
+    sampler s;
+    constant float4 *sizes;
+    // Sample slot `i` at uv, 0..1 with a top-left origin. Wraps.
+    float4 sample(int i, float2 uv) {
+        return textures[i].sample(s, uv);
+    }
+    // Slot `i` in pixels, (0, 0) when empty.
+    float2 size(int i) {
+        return sizes[i].xy;
+    }
+};
+
 struct EffectVertex {
     float4 position [[position]];
     float2 uv;
@@ -127,27 +143,34 @@ float effect_corner_coverage(float2 p, float2 size, float4 radii) {
 "#;
 
 /// The fragment entry, after the user's source so it can call `effect`.
-/// `EffectBackdrop` in the source adds the backdrop argument and
-/// `EffectParams` adds the params argument, in that order.
+/// Each wrapper type the source mentions adds an argument, in this order:
+/// `EffectBackdrop` the backdrop, `EffectParams` the params,
+/// `EffectImages` the images.
 fn fragment_entry(source: &str) -> String {
-    let call = match (
-        source.contains("EffectBackdrop"),
-        source.contains("EffectParams"),
-    ) {
-        (false, false) => "effect(in.uv, u)",
-        (true, false) => "effect(in.uv, u, backdrop)",
-        (false, true) => "effect(in.uv, u, p)",
-        (true, true) => "effect(in.uv, u, backdrop, p)",
-    };
+    let mut args = vec!["in.uv", "u"];
+    for (marker, arg) in [
+        ("EffectBackdrop", "backdrop"),
+        ("EffectParams", "p"),
+        ("EffectImages", "images"),
+    ] {
+        if source.contains(marker) {
+            args.push(arg);
+        }
+    }
+    let call = format!("effect({})", args.join(", "));
     format!(
         r#"
 fragment float4 effect_fragment(EffectVertex in [[stage_in]],
                                 constant EffectUniforms &u [[buffer(0)]],
                                 constant float2 &viewport [[buffer(1)]],
                                 constant EffectParams &p [[buffer(2)]],
+                                constant float4 *image_sizes [[buffer(3)]],
                                 texture2d<float> backdrop_texture [[texture(0)]],
-                                sampler backdrop_sampler [[sampler(0)]]) {{
+                                array<texture2d<float>, 4> image_textures [[texture(1)]],
+                                sampler backdrop_sampler [[sampler(0)]],
+                                sampler image_sampler [[sampler(1)]]) {{
     EffectBackdrop backdrop {{ backdrop_texture, backdrop_sampler, viewport, u.origin, u.resolution }};
+    EffectImages images {{ image_textures, image_sampler, image_sizes }};
     float4 color = {call};
     if (any(u.corner_radii > 0.0)) {{
         color *= effect_corner_coverage(in.uv * u.resolution, u.resolution, u.corner_radii);
@@ -170,9 +193,45 @@ fn full_source(source: &str, params: &ParamLayout) -> String {
 struct Ready {
     pipeline: metal::RenderPipelineState,
     sampler: metal::SamplerState,
-    /// Bound when the frame carries no backdrop, so sampling stays defined.
+    /// Wraps, for tiled image lookups.
+    image_sampler: metal::SamplerState,
+    /// Bound to every texture slot that has nothing, so sampling stays defined.
     blank: metal::Texture,
 }
+
+/// One image slot: bytes from the app, and the texture once uploaded.
+/// `texture` is `None` until the next frame after `Effect::image`.
+struct Image {
+    width: u32,
+    height: u32,
+    bgra: Vec<u8>,
+    texture: Option<metal::Texture>,
+}
+
+/// Why `Effect::image` refused an upload.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ImageError {
+    /// Slots run 0..4.
+    BadSlot(usize),
+    /// `bgra.len()` must be `width * height * 4`.
+    BadLength { expected: usize, got: usize },
+}
+
+impl std::fmt::Display for ImageError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ImageError::BadSlot(slot) => write!(f, "image slot {slot} is not in 0..4"),
+            ImageError::BadLength { expected, got } => {
+                write!(f, "image bytes: expected {expected}, got {got}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ImageError {}
+
+/// Image slots the shader can read.
+pub const IMAGE_SLOTS: usize = 4;
 
 enum Pipeline {
     Pending,
@@ -186,6 +245,7 @@ struct Inner {
     /// App parameters, uploaded at buffer(2) as `EffectParams`.
     params: ParamLayout,
     warned_unread_params: bool,
+    images: [Option<Image>; IMAGE_SLOTS],
     /// The shader reads the pointer, so the element follows it.
     reads_pointer: bool,
 }
@@ -217,6 +277,7 @@ impl Effect {
             pipeline: Pipeline::Pending,
             params: ParamLayout::empty(),
             warned_unread_params: false,
+            images: [None, None, None, None],
             reads_pointer: false,
         })))
     }
@@ -240,6 +301,37 @@ impl Effect {
             );
         }
         inner.params.set(name, value.into())
+    }
+
+    /// Give the shader an image in `slot` (0..4). `bgra` is premultiplied
+    /// BGRA8, `width * height * 4` bytes, the format gpui's `RenderImage`
+    /// holds. The upload happens on the next frame; call `cx.notify()` to
+    /// get one. The shader takes `EffectImages images` as its last argument
+    /// and reads `images.sample(slot, uv)`; GLSL sees `iChannel1..3`.
+    pub fn image(
+        &self,
+        slot: usize,
+        width: u32,
+        height: u32,
+        bgra: Vec<u8>,
+    ) -> Result<(), ImageError> {
+        if slot >= IMAGE_SLOTS {
+            return Err(ImageError::BadSlot(slot));
+        }
+        let expected = width as usize * height as usize * 4;
+        if bgra.len() != expected {
+            return Err(ImageError::BadLength {
+                expected,
+                got: bgra.len(),
+            });
+        }
+        self.0.borrow_mut().images[slot] = Some(Image {
+            width,
+            height,
+            bgra,
+            texture: None,
+        });
+        Ok(())
     }
 
     /// Wrap a Shadertoy or Ghostty style GLSL shader. See [`crate::glsl_to_msl`]
@@ -328,6 +420,12 @@ fn build_pipeline(
     sampler.set_address_mode_s(metal::MTLSamplerAddressMode::ClampToEdge);
     sampler.set_address_mode_t(metal::MTLSamplerAddressMode::ClampToEdge);
     let sampler = frame.device.new_sampler(&sampler);
+    let image_sampler = metal::SamplerDescriptor::new();
+    image_sampler.set_min_filter(metal::MTLSamplerMinMagFilter::Linear);
+    image_sampler.set_mag_filter(metal::MTLSamplerMinMagFilter::Linear);
+    image_sampler.set_address_mode_s(metal::MTLSamplerAddressMode::Repeat);
+    image_sampler.set_address_mode_t(metal::MTLSamplerAddressMode::Repeat);
+    let image_sampler = frame.device.new_sampler(&image_sampler);
 
     let blank = metal::TextureDescriptor::new();
     blank.set_width(1);
@@ -346,7 +444,29 @@ fn build_pipeline(
     Ok(Ready {
         pipeline,
         sampler,
+        image_sampler,
         blank,
+    })
+}
+
+/// Upload `image` if it has not been yet, and return its texture.
+fn image_texture<'a>(image: &'a mut Image, device: &metal::DeviceRef) -> &'a metal::Texture {
+    image.texture.get_or_insert_with(|| {
+        let descriptor = metal::TextureDescriptor::new();
+        descriptor.set_width(image.width as u64);
+        descriptor.set_height(image.height as u64);
+        descriptor.set_pixel_format(metal::MTLPixelFormat::BGRA8Unorm);
+        descriptor.set_usage(metal::MTLTextureUsage::ShaderRead);
+        let texture = device.new_texture(&descriptor);
+        texture.replace_region(
+            metal::MTLRegion::new_2d(0, 0, image.width as u64, image.height as u64),
+            0,
+            image.bgra.as_ptr() as *const _,
+            image.width as u64 * 4,
+        );
+        // The GPU has its own copy now.
+        image.bgra = Vec::new();
+        texture
     })
 }
 
@@ -355,6 +475,7 @@ impl GpuCanvasRenderer for Inner {
         // Split the borrow: the pipeline is built from `params` and then
         // drawn alongside it.
         let params = &self.params;
+        let images = &mut self.images;
         let Some(ready) = self.pipeline.ready(&self.source, params, frame) else {
             return;
         };
@@ -390,6 +511,23 @@ impl GpuCanvasRenderer for Inner {
         encoder.set_fragment_bytes(2, params.len() as u64, params.as_ptr() as *const _);
         encoder.set_fragment_texture(0, Some(frame.backdrop.unwrap_or(&ready.blank)));
         encoder.set_fragment_sampler_state(0, Some(&ready.sampler));
+        let mut sizes = [[0f32; 4]; IMAGE_SLOTS];
+        for (slot, image) in images.iter_mut().enumerate() {
+            let texture = match image {
+                Some(image) => {
+                    sizes[slot] = [image.width as f32, image.height as f32, 0., 0.];
+                    image_texture(image, frame.device)
+                }
+                None => &ready.blank,
+            };
+            encoder.set_fragment_texture(1 + slot as u64, Some(texture));
+        }
+        encoder.set_fragment_bytes(
+            3,
+            std::mem::size_of_val(&sizes) as u64,
+            sizes.as_ptr() as *const _,
+        );
+        encoder.set_fragment_sampler_state(1, Some(&ready.image_sampler));
         encoder.draw_primitives(metal::MTLPrimitiveType::Triangle, 0, 6);
     }
 }
@@ -521,6 +659,11 @@ mod tests {
                 "... EffectBackdrop b, constant EffectParams &p)",
                 "effect(in.uv, u, backdrop, p);",
             ),
+            ("... EffectImages i)", "effect(in.uv, u, images);"),
+            (
+                "... EffectBackdrop b, constant EffectParams &p, EffectImages i)",
+                "effect(in.uv, u, backdrop, p, images);",
+            ),
         ];
         for (source, call) in cases {
             assert!(fragment_entry(source).contains(call), "{source}");
@@ -535,6 +678,36 @@ mod tests {
         assert!(Effect::shadertoy(reads).reads_pointer());
         assert!(!Effect::shadertoy(ignores).reads_pointer());
         assert!(!Effect::new("float4 effect(float2 uv, constant EffectUniforms &u) { return float4(u.pointer, 0, 1); }").reads_pointer());
+    }
+
+    /// A shader that reads images compiles against the wrapper.
+    #[test]
+    fn image_effect_compiles() {
+        let Some(device) = metal::Device::system_default() else {
+            eprintln!("no Metal device; skipping");
+            return;
+        };
+        let effect = "float4 effect(float2 uv, constant EffectUniforms &u, EffectImages i) { return i.sample(1, uv) * i.size(1).x; }";
+        let source = full_source(effect, &ParamLayout::empty());
+        device
+            .new_library_with_source(&source, &metal::CompileOptions::new())
+            .expect("image preamble compiles")
+            .get_function("effect_fragment", None)
+            .unwrap();
+    }
+
+    #[test]
+    fn image_rejects_bad_slot_and_length() {
+        let effect = Effect::new("");
+        assert_eq!(effect.image(4, 1, 1, vec![0; 4]), Err(ImageError::BadSlot(4)));
+        assert_eq!(
+            effect.image(0, 2, 2, vec![0; 4]),
+            Err(ImageError::BadLength {
+                expected: 16,
+                got: 4
+            })
+        );
+        assert_eq!(effect.image(3, 2, 2, vec![0; 16]), Ok(()));
     }
 
     /// The three-argument form compiles and links against the wrapper.

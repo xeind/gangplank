@@ -15,3 +15,4 @@ regex = "1"
 [dev-dependencies]
 log = "0.4"
 gpui = { package = "gpui-ce", version = "0.3", features = ["test-support"] }
+image = "0.25"

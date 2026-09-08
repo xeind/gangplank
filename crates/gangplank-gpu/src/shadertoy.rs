@@ -22,7 +22,7 @@ use std::sync::OnceLock;
 pub fn glsl_to_msl(glsl: &str) -> String {
     let body = rewrite_body(glsl);
     format!(
-        "{PRELUDE}\nstruct Shadertoy {{\n    constant EffectUniforms &u;\n    EffectBackdrop backdrop;\n{body}\n}};\n{ENTRY}"
+        "{PRELUDE}\nstruct Shadertoy {{\n    constant EffectUniforms &u;\n    EffectBackdrop backdrop;\n    EffectImages images;\n{body}\n}};\n{ENTRY}"
     )
 }
 
@@ -80,15 +80,23 @@ inline float2 atan(float2 y, float2 x) { return atan2(y, x); }
     ? float4(u.pointer.x, u.resolution.y - u.pointer.y, 0.0, 0.0) \
     : float4(0.0))
 #define iChannel0 (backdrop)
-// GLSL `texture(iChannel0, uv)`, uv with a bottom-left origin.
+// App images from `Effect::image(0..3, ..)`.
+struct EffectChannel { EffectImages images; int slot; };
+#define iChannel1 (EffectChannel{images, 0})
+#define iChannel2 (EffectChannel{images, 1})
+#define iChannel3 (EffectChannel{images, 2})
+// GLSL `texture(iChannelN, uv)`, uv with a bottom-left origin.
 inline float4 texture(EffectBackdrop b, float2 uv) {
     return b.sample(float2(uv.x, 1.0 - uv.y));
+}
+inline float4 texture(EffectChannel c, float2 uv) {
+    return c.images.sample(c.slot, float2(uv.x, 1.0 - uv.y));
 }
 "#;
 
 const ENTRY: &str = r#"
-float4 effect(float2 uv, constant EffectUniforms &u, EffectBackdrop backdrop) {
-    Shadertoy s{u, backdrop};
+float4 effect(float2 uv, constant EffectUniforms &u, EffectBackdrop backdrop, EffectImages images) {
+    Shadertoy s{u, backdrop, images};
     float4 color = float4(0.0, 0.0, 0.0, 1.0);
     // Shadertoy's fragCoord has its origin at the bottom-left.
     float2 fragCoord = float2(uv.x, 1.0 - uv.y) * u.resolution;
