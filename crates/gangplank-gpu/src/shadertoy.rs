@@ -15,15 +15,48 @@
 //! constructors, and GLSL-only builtins. Those surface as a Metal compile
 //! error in the log.
 
+use crate::Param;
 use regex::Regex;
 use std::sync::OnceLock;
 
-/// GLSL to MSL. The result defines `effect(uv, u)` as [`crate::Effect`] needs.
+/// GLSL to MSL. The result defines `effect(uv, u, ...)` as [`crate::Effect`]
+/// needs. File-scope `uniform` declarations become [`Effect::params`]
+/// fields of the same name; see [`glsl_uniforms`].
 pub fn glsl_to_msl(glsl: &str) -> String {
+    let defines = glsl_uniforms(glsl)
+        .iter()
+        .map(|(name, _)| format!("#define {name} (p.{name})\n"))
+        .collect::<String>();
     let body = rewrite_body(glsl);
     format!(
-        "{PRELUDE}\nstruct Shadertoy {{\n    constant EffectUniforms &u;\n    EffectBackdrop backdrop;\n    EffectImages images;\n{body}\n}};\n{ENTRY}"
+        "{PRELUDE}\n{defines}struct Shadertoy {{\n    constant EffectUniforms &u;\n    EffectBackdrop backdrop;\n    EffectImages images;\n    constant EffectParams &p;\n{body}\n}};\n{ENTRY}"
     )
+}
+
+/// The `uniform float|vec2|vec3|vec4|int name;` declarations in `glsl`, in
+/// order, as params. Other uniform types are left in place and fail to
+/// compile, which is the honest outcome.
+pub fn glsl_uniforms(glsl: &str) -> Vec<(String, Param)> {
+    uniform_regex()
+        .captures_iter(glsl)
+        .map(|c| {
+            let ty = match &c[1] {
+                "float" => Param::Float,
+                "vec2" => Param::Float2,
+                "vec3" => Param::Float3,
+                "vec4" => Param::Float4,
+                _ => Param::Int,
+            };
+            (c[2].to_string(), ty)
+        })
+        .collect()
+}
+
+fn uniform_regex() -> &'static Regex {
+    static UNIFORM: OnceLock<Regex> = OnceLock::new();
+    UNIFORM.get_or_init(|| {
+        Regex::new(r"(?m)^\s*uniform\s+(float|vec2|vec3|vec4|int)\s+(\w+)\s*;[ \t]*$").unwrap()
+    })
 }
 
 fn rewrite_body(glsl: &str) -> String {
@@ -42,6 +75,7 @@ fn rewrite_body(glsl: &str) -> String {
     let konst = CONST.get_or_init(|| Regex::new(r"(?m)^\s*const\s+").unwrap());
 
     let s = precision.replace_all(glsl, "");
+    let s = uniform_regex().replace_all(&s, "");
     let s = inout.replace_all(&s, "thread $1 &$2");
     let s = out.replace_all(&s, "thread $1 &$2");
     let s = inp.replace_all(&s, "$1 $2");
@@ -73,8 +107,9 @@ inline float2 atan(float2 y, float2 x) { return atan2(y, x); }
 
 // Shadertoy globals, read through the wrapping struct's `u`.
 #define iTime (u.time)
-#define iTimeDelta (1.0 / 60.0)
-#define iFrame (int(u.time * 60.0))
+#define iTimeDelta (u.delta)
+#define iFrame (int(u.frame))
+#define iFrameRate (u.delta > 0.0 ? 1.0 / u.delta : 0.0)
 #define iResolution (float3(u.resolution, 1.0))
 #define iMouse (u.has_pointer > 0.5 \
     ? float4(u.pointer.x, u.resolution.y - u.pointer.y, 0.0, 0.0) \
@@ -95,8 +130,9 @@ inline float4 texture(EffectChannel c, float2 uv) {
 "#;
 
 const ENTRY: &str = r#"
-float4 effect(float2 uv, constant EffectUniforms &u, EffectBackdrop backdrop, EffectImages images) {
-    Shadertoy s{u, backdrop, images};
+float4 effect(float2 uv, constant EffectUniforms &u, EffectBackdrop backdrop,
+              constant EffectParams &p, EffectImages images) {
+    Shadertoy s{u, backdrop, images, p};
     float4 color = float4(0.0, 0.0, 0.0, 1.0);
     // Shadertoy's fragCoord has its origin at the bottom-left.
     float2 fragCoord = float2(uv.x, 1.0 - uv.y) * u.resolution;
@@ -119,5 +155,21 @@ mod tests {
         assert!(msl.contains("struct Shadertoy {"));
         assert!(msl.contains("s.mainImage(color, fragCoord);"));
         assert!(msl.contains("EffectBackdrop backdrop;"));
+    }
+
+    #[test]
+    fn uniforms_become_params_and_defines() {
+        let glsl = "uniform vec4 tint;\nuniform float amount;\nuniform sampler2D tex;\nvoid mainImage(out vec4 c, in vec2 p) { c = tint * amount; }";
+        assert_eq!(
+            glsl_uniforms(glsl),
+            vec![
+                ("tint".to_string(), Param::Float4),
+                ("amount".to_string(), Param::Float)
+            ]
+        );
+        let msl = glsl_to_msl(glsl);
+        assert!(msl.contains("#define tint (p.tint)"));
+        assert!(!msl.contains("uniform vec4"));
+        assert!(msl.contains("uniform sampler2D tex;"), "unknown types stay");
     }
 }

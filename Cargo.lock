@@ -2042,6 +2042,7 @@ dependencies = [
 name = "gangplank-gpu"
 version = "0.1.0"
 dependencies = [
+ "gangplank",
  "gpui-ce",
  "image",
  "log",

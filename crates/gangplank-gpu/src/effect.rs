@@ -21,14 +21,18 @@ pub struct EffectUniforms {
     pub scale: f32,
     /// `1.0` while the pointer is over the element, else `0.0`.
     pub has_pointer: f32,
-    _pad: [f32; 3],
+    /// Seconds since this effect last drew; `0.0` on its first frame.
+    pub delta: f32,
+    /// How many frames this effect has drawn before this one.
+    pub frame: u32,
+    _pad: f32,
     /// Corner radii in device pixels: top-left, top-right, bottom-right,
     /// bottom-left. The wrapper fades the effect out past them.
     pub corner_radii: [f32; 4],
 }
 
 impl EffectUniforms {
-    fn from_frame(frame: &GpuCanvasFrame<'_>) -> Self {
+    fn from_frame(frame: &GpuCanvasFrame<'_>, clock: &Clock) -> Self {
         let origin = [
             frame.bounds.origin.x.0 as f32,
             frame.bounds.origin.y.0 as f32,
@@ -46,7 +50,9 @@ impl EffectUniforms {
             time: frame.time.as_secs_f32(),
             scale: frame.scale_factor,
             has_pointer: if pointer.is_some() { 1. } else { 0. },
-            _pad: [0.; 3],
+            delta: clock.delta.as_secs_f32(),
+            frame: clock.frame,
+            _pad: 0.,
             corner_radii: [
                 frame.corner_radii.top_left,
                 frame.corner_radii.top_right,
@@ -70,11 +76,9 @@ struct EffectUniforms {
     float time;
     float scale;
     float has_pointer;
-    // Three scalars, not float3: float3 aligns to 16 and would push
-    // corner_radii past the 64 bytes Rust uploads.
+    float delta;        // seconds since this effect last drew, 0 on the first frame
+    uint frame;         // frames this effect drew before this one
     float _pad0;
-    float _pad1;
-    float _pad2;
     float4 corner_radii;
 };
 
@@ -239,9 +243,38 @@ enum Pipeline {
     Failed,
 }
 
+/// What this effect has drawn so far, for `delta` and `frame`.
+#[derive(Default)]
+struct Clock {
+    last_time: Option<Duration>,
+    delta: Duration,
+    frame: u32,
+}
+
+impl Clock {
+    /// Advance to `time`. `delta` is 0 on the first frame and never
+    /// negative: a clock that jumps back reads as a fresh start.
+    fn tick(&mut self, time: Duration) {
+        self.delta = match self.last_time {
+            Some(last) => time.saturating_sub(last),
+            None => Duration::ZERO,
+        };
+        self.last_time = Some(time);
+    }
+
+    /// The frame just drawn is now in the past.
+    fn drew(&mut self) {
+        self.frame += 1;
+    }
+}
+
 struct Inner {
     source: String,
+    clock: Clock,
     pipeline: Pipeline,
+    /// The pipeline that drew before `set_source`, kept until the new
+    /// source compiles so an edit that fails never blanks the element.
+    last_good: Option<Ready>,
     /// App parameters, uploaded at buffer(2) as `EffectParams`.
     params: ParamLayout,
     warned_unread_params: bool,
@@ -274,7 +307,9 @@ impl Effect {
     pub fn new(source: impl Into<String>) -> Self {
         Effect(Rc::new(RefCell::new(Inner {
             source: source.into(),
+            clock: Clock::default(),
             pipeline: Pipeline::Pending,
+            last_good: None,
             params: ParamLayout::empty(),
             warned_unread_params: false,
             images: [None, None, None, None],
@@ -301,6 +336,32 @@ impl Effect {
             );
         }
         inner.params.set(name, value.into())
+    }
+
+    /// Replace the shader source. It compiles on the next frame; if that
+    /// fails, the element keeps drawing the last source that compiled and
+    /// the error is logged once. Params and images carry over.
+    pub fn set_source(&self, source: impl Into<String>) {
+        let mut inner = self.0.borrow_mut();
+        inner.source = source.into();
+        if let Pipeline::Ready(ready) = std::mem::replace(&mut inner.pipeline, Pipeline::Pending) {
+            inner.last_good = Some(ready);
+        }
+    }
+
+    /// Wrap a Shadertoy or Ghostty style GLSL shader, replacing the source
+    /// as [`Effect::set_source`] does. Its `uniform` declarations become the
+    /// params, so earlier values reset.
+    pub fn set_shadertoy(&self, glsl: &str) {
+        self.set_source(crate::glsl_to_msl(glsl));
+        let decls = crate::glsl_uniforms(glsl);
+        let decls: Vec<(&str, Param)> = decls.iter().map(|(n, t)| (n.as_str(), *t)).collect();
+        let mut inner = self.0.borrow_mut();
+        inner.params = ParamLayout::new(&decls).unwrap_or_else(|err| {
+            log::error!("gangplank-gpu: GLSL uniforms: {err}");
+            ParamLayout::empty()
+        });
+        inner.reads_pointer = glsl.contains("iMouse");
     }
 
     /// Give the shader an image in `slot` (0..4). `bgra` is premultiplied
@@ -338,8 +399,8 @@ impl Effect {
     /// for what is and is not translated. A shader that mentions `iMouse`
     /// gets `.follow_pointer()` on its element without being asked.
     pub fn shadertoy(glsl: &str) -> Self {
-        let effect = Self::new(crate::glsl_to_msl(glsl));
-        effect.0.borrow_mut().reads_pointer = glsl.contains("iMouse");
+        let effect = Self::new(String::new());
+        effect.set_shadertoy(glsl);
         effect
     }
 
@@ -361,20 +422,33 @@ impl Effect {
 }
 
 impl Pipeline {
-    /// Build on first use, then hand back the compiled state.
+    /// Build on first use, then hand back the compiled state. A failed
+    /// build falls back to `last_good` when there is one.
     fn ready(
         &mut self,
         source: &str,
         params: &ParamLayout,
+        last_good: &mut Option<Ready>,
         frame: &GpuCanvasFrame<'_>,
     ) -> Option<&Ready> {
         if let Pipeline::Pending = self {
             *self = match build_pipeline(source, params, frame) {
-                Ok(ready) => Pipeline::Ready(ready),
-                Err(err) => {
-                    log::error!("gangplank-gpu: effect failed to compile: {err}");
-                    Pipeline::Failed
+                Ok(ready) => {
+                    *last_good = None;
+                    Pipeline::Ready(ready)
                 }
+                Err(err) => match last_good.take() {
+                    Some(previous) => {
+                        log::error!(
+                            "gangplank-gpu: effect failed to compile, keeping the last working one: {err}"
+                        );
+                        Pipeline::Ready(previous)
+                    }
+                    None => {
+                        log::error!("gangplank-gpu: effect failed to compile: {err}");
+                        Pipeline::Failed
+                    }
+                },
             };
         }
         match self {
@@ -476,10 +550,13 @@ impl GpuCanvasRenderer for Inner {
         // drawn alongside it.
         let params = &self.params;
         let images = &mut self.images;
-        let Some(ready) = self.pipeline.ready(&self.source, params, frame) else {
+        let last_good = &mut self.last_good;
+        let Some(ready) = self.pipeline.ready(&self.source, params, last_good, frame) else {
             return;
         };
-        let uniforms = EffectUniforms::from_frame(frame);
+        self.clock.tick(frame.time);
+        let uniforms = EffectUniforms::from_frame(frame, &self.clock);
+        self.clock.drew();
         let viewport = [
             frame.viewport_size.width.0 as f32,
             frame.viewport_size.height.0 as f32,
@@ -561,6 +638,8 @@ mod tests {
             ("time", offset_of!(EffectUniforms, time)),
             ("scale", offset_of!(EffectUniforms, scale)),
             ("has_pointer", offset_of!(EffectUniforms, has_pointer)),
+            ("delta", offset_of!(EffectUniforms, delta)),
+            ("frame", offset_of!(EffectUniforms, frame)),
             ("_pad0", offset_of!(EffectUniforms, _pad)),
             ("corner_radii", offset_of!(EffectUniforms, corner_radii)),
         ];
@@ -697,9 +776,37 @@ mod tests {
     }
 
     #[test]
+    fn set_source_recompiles_and_shadertoy_uniforms_are_settable() {
+        let effect = Effect::shadertoy(
+            "uniform vec4 tint;\nvoid mainImage(out vec4 c, in vec2 p) { c = tint; }",
+        );
+        assert_eq!(effect.set("tint", [1., 0., 0., 1.]), Ok(()));
+        effect.set_source("float4 effect(float2 uv, constant EffectUniforms &u) { return 0; }");
+        assert!(matches!(effect.0.borrow().pipeline, Pipeline::Pending));
+        assert!(!effect.reads_pointer());
+    }
+
+    #[test]
+    fn clock_measures_delta_and_counts_frames() {
+        let mut clock = Clock::default();
+        clock.tick(Duration::from_millis(100));
+        assert_eq!((clock.delta, clock.frame), (Duration::ZERO, 0));
+        clock.drew();
+        clock.tick(Duration::from_millis(116));
+        assert_eq!((clock.delta, clock.frame), (Duration::from_millis(16), 1));
+        clock.drew();
+        // Time went backwards: no negative delta, no panic.
+        clock.tick(Duration::from_millis(50));
+        assert_eq!((clock.delta, clock.frame), (Duration::ZERO, 2));
+    }
+
+    #[test]
     fn image_rejects_bad_slot_and_length() {
         let effect = Effect::new("");
-        assert_eq!(effect.image(4, 1, 1, vec![0; 4]), Err(ImageError::BadSlot(4)));
+        assert_eq!(
+            effect.image(4, 1, 1, vec![0; 4]),
+            Err(ImageError::BadSlot(4))
+        );
         assert_eq!(
             effect.image(0, 2, 2, vec![0; 4]),
             Err(ImageError::BadLength {

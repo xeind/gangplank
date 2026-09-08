@@ -16,3 +16,4 @@ regex = "1"
 log = "0.4"
 gpui = { package = "gpui-ce", version = "0.3", features = ["test-support"] }
 image = "0.25"
+gangplank = { path = "../gangplank" }
