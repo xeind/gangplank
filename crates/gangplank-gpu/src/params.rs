@@ -41,6 +41,17 @@ impl Param {
             Param::Int => "int",
         }
     }
+
+    /// The WGSL type name.
+    pub fn wgsl(self) -> &'static str {
+        match self {
+            Param::Float => "f32",
+            Param::Float2 => "vec2<f32>",
+            Param::Float3 => "vec3<f32>",
+            Param::Float4 => "vec4<f32>",
+            Param::Int => "i32",
+        }
+    }
 }
 
 /// One value for [`Effect::set`](crate::Effect::set).
@@ -240,6 +251,23 @@ impl ParamLayout {
         out
     }
 
+    /// The same struct as WGSL, for [`crate::Effect::wgsl`] sources. A
+    /// `vec3` gets `@size(16)`: WGSL would otherwise give it 12 bytes and
+    /// put the next field at an offset MSL's `float3` never has.
+    pub(crate) fn wgsl_struct(&self) -> String {
+        let mut out = String::from("struct EffectParams {\n");
+        for field in &self.fields {
+            let attr = if field.ty == Param::Float3 {
+                "@size(16) "
+            } else {
+                ""
+            };
+            out.push_str(&format!("    {attr}{}: {},\n", field.name, field.ty.wgsl()));
+        }
+        out.push_str("};\n");
+        out
+    }
+
     pub(crate) fn bytes(&self) -> &[u8] {
         &self.bytes
     }
@@ -298,6 +326,14 @@ mod tests {
         assert_eq!(
             layout.msl_struct(),
             "struct EffectParams {\n    float4 tint;\n    float distortion;\n};\n"
+        );
+    }
+
+    #[test]
+    fn wgsl_struct_text_matches() {
+        assert_eq!(
+            awkward().wgsl_struct(),
+            "struct EffectParams {\n    a: f32,\n    @size(16) b: vec3<f32>,\n    c: f32,\n    d: vec2<f32>,\n    e: vec4<f32>,\n    f: i32,\n};\n"
         );
     }
 

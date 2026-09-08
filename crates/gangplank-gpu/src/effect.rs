@@ -185,13 +185,45 @@ fragment float4 effect_fragment(EffectVertex in [[stage_in]],
     )
 }
 
-/// Preamble, params struct, user source, entry: what Metal compiles.
-fn full_source(source: &str, params: &ParamLayout) -> String {
-    format!(
-        "{PREAMBLE}\n{}\n{source}\n{}",
-        params.msl_struct(),
-        fragment_entry(source)
-    )
+/// What the app handed over, in the language it wrote.
+enum Source {
+    Msl(String),
+    Wgsl(String),
+}
+
+impl Source {
+    /// Whether the shader can see the params, for the `set` warning. MSL
+    /// names the type; WGSL reads the global `p`.
+    fn reads_params(&self) -> bool {
+        static READS_P: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+        match self {
+            Source::Msl(msl) => msl.contains("EffectParams"),
+            Source::Wgsl(wgsl) => READS_P
+                .get_or_init(|| regex::Regex::new(r"\bp\.").unwrap())
+                .is_match(wgsl),
+        }
+    }
+
+    /// What the `set` warning calls the params in this language.
+    fn params_name(&self) -> &'static str {
+        match self {
+            Source::Msl(_) => "EffectParams",
+            Source::Wgsl(_) => "p",
+        }
+    }
+}
+
+/// What Metal compiles. MSL: preamble, params struct, user source, entry.
+/// WGSL: naga's translation of the user source plus the WGSL preamble.
+fn full_source(source: &Source, params: &ParamLayout) -> Result<String, String> {
+    match source {
+        Source::Msl(msl) => Ok(format!(
+            "{PREAMBLE}\n{}\n{msl}\n{}",
+            params.msl_struct(),
+            fragment_entry(msl)
+        )),
+        Source::Wgsl(wgsl) => crate::wgsl::wgsl_to_msl(wgsl, params),
+    }
 }
 
 struct Ready {
@@ -269,7 +301,7 @@ impl Clock {
 }
 
 struct Inner {
-    source: String,
+    source: Source,
     clock: Clock,
     pipeline: Pipeline,
     /// The pipeline that drew before `set_source`, kept until the new
@@ -305,8 +337,20 @@ impl Effect {
     /// Wrap Metal source. Compilation happens on the first frame; a compile
     /// error is logged once and the element then draws nothing.
     pub fn new(source: impl Into<String>) -> Self {
+        Self::from_source(Source::Msl(source.into()))
+    }
+
+    /// Wrap a WGSL effect: `fn effect(uv: vec2<f32>) -> vec4<f32>` that
+    /// reads `u`, `p`, `viewport`, the textures and samplers as globals
+    /// (`src/wgsl.rs` declares them). Translated by naga and compiled on
+    /// the first frame; a translation error logs once like a compile error.
+    pub fn wgsl(source: impl Into<String>) -> Self {
+        Self::from_source(Source::Wgsl(source.into()))
+    }
+
+    fn from_source(source: Source) -> Self {
         Effect(Rc::new(RefCell::new(Inner {
-            source: source.into(),
+            source,
             clock: Clock::default(),
             pipeline: Pipeline::Pending,
             last_good: None,
@@ -329,10 +373,11 @@ impl Effect {
     /// get one. Errors name the problem, so `?` or `expect` at the call.
     pub fn set(&self, name: &str, value: impl Into<ParamValue>) -> Result<(), ParamError> {
         let mut inner = self.0.borrow_mut();
-        if !inner.warned_unread_params && !inner.source.contains("EffectParams") {
+        if !inner.warned_unread_params && !inner.source.reads_params() {
             inner.warned_unread_params = true;
             log::warn!(
-                "gangplank-gpu: set(\"{name}\") on an effect whose shader never reads EffectParams"
+                "gangplank-gpu: set(\"{name}\") on an effect whose shader never reads {}",
+                inner.source.params_name()
             );
         }
         inner.params.set(name, value.into())
@@ -342,8 +387,17 @@ impl Effect {
     /// fails, the element keeps drawing the last source that compiled and
     /// the error is logged once. Params and images carry over.
     pub fn set_source(&self, source: impl Into<String>) {
+        self.replace_source(Source::Msl(source.into()));
+    }
+
+    /// Replace the source with WGSL, as [`Effect::set_source`] does for MSL.
+    pub fn set_wgsl(&self, source: impl Into<String>) {
+        self.replace_source(Source::Wgsl(source.into()));
+    }
+
+    fn replace_source(&self, source: Source) {
         let mut inner = self.0.borrow_mut();
-        inner.source = source.into();
+        inner.source = source;
         if let Pipeline::Ready(ready) = std::mem::replace(&mut inner.pipeline, Pipeline::Pending) {
             inner.last_good = Some(ready);
         }
@@ -426,7 +480,7 @@ impl Pipeline {
     /// build falls back to `last_good` when there is one.
     fn ready(
         &mut self,
-        source: &str,
+        source: &Source,
         params: &ParamLayout,
         last_good: &mut Option<Ready>,
         frame: &GpuCanvasFrame<'_>,
@@ -459,11 +513,11 @@ impl Pipeline {
 }
 
 fn build_pipeline(
-    source: &str,
+    source: &Source,
     params: &ParamLayout,
     frame: &GpuCanvasFrame<'_>,
 ) -> Result<Ready, String> {
-    let full = full_source(source, params);
+    let full = full_source(source, params)?;
     let library = frame
         .device
         .new_library_with_source(&full, &metal::CompileOptions::new())?;
@@ -625,7 +679,7 @@ mod tests {
         };
         let effect =
             "float4 effect(float2 uv, constant EffectUniforms &u) { return float4(uv, 0, 1); }";
-        let uniforms = fragment_argument(&device, effect, &ParamLayout::empty(), "u");
+        let uniforms = fragment_argument(&device, &msl(effect, &ParamLayout::empty()), "u");
         assert_eq!(
             uniforms.buffer_data_size() as usize,
             std::mem::size_of::<EffectUniforms>()
@@ -648,16 +702,16 @@ mod tests {
         }
     }
 
-    /// Compile `effect` with `params` and return the fragment argument
-    /// named `name`, with Metal's own view of its layout.
-    fn fragment_argument(
-        device: &metal::Device,
-        effect: &str,
-        params: &ParamLayout,
-        name: &str,
-    ) -> metal::Argument {
+    /// What Metal compiles for an MSL `effect` with `params`.
+    fn msl(effect: &str, params: &ParamLayout) -> String {
+        full_source(&Source::Msl(effect.into()), params).unwrap()
+    }
+
+    /// Compile `source` and return the fragment argument named `name`,
+    /// with Metal's own view of its layout.
+    fn fragment_argument(device: &metal::Device, source: &str, name: &str) -> metal::Argument {
         let library = device
-            .new_library_with_source(&full_source(effect, params), &metal::CompileOptions::new())
+            .new_library_with_source(source, &metal::CompileOptions::new())
             .expect("source compiles");
         let descriptor = metal::RenderPipelineDescriptor::new();
         descriptor.set_vertex_function(Some(&library.get_function("effect_vertex", None).unwrap()));
@@ -694,15 +748,9 @@ mod tests {
         }
     }
 
-    /// The pure-Rust layout must agree with Metal for every type, in an
-    /// order that exercises float3 and float2 padding.
-    #[test]
-    fn metal_param_offsets_match_layout() {
-        let Some(device) = metal::Device::system_default() else {
-            eprintln!("no Metal device; skipping");
-            return;
-        };
-        let layout = ParamLayout::new(&[
+    /// Every type, in an order that exercises float3 and float2 padding.
+    fn awkward_layout() -> ParamLayout {
+        ParamLayout::new(&[
             ("a", Param::Float),
             ("b", Param::Float3),
             ("c", Param::Float),
@@ -710,9 +758,12 @@ mod tests {
             ("e", Param::Float4),
             ("f", Param::Int),
         ])
-        .unwrap();
-        let effect = "float4 effect(float2 uv, constant EffectUniforms &u, constant EffectParams &p) { return p.e + p.a; }";
-        let argument = fragment_argument(&device, effect, &layout, "p");
+        .unwrap()
+    }
+
+    /// Metal's offsets for fragment argument `p` must equal `layout`'s.
+    fn assert_params_match(device: &metal::Device, source: &str, layout: &ParamLayout) {
+        let argument = fragment_argument(device, source, "p");
         assert_eq!(argument.buffer_data_size() as usize, layout.size());
         let metal_offset = member_offsets(&argument);
         for field in layout.fields() {
@@ -723,6 +774,45 @@ mod tests {
                 field.name
             );
         }
+    }
+
+    /// The pure-Rust layout must agree with Metal for every type.
+    #[test]
+    fn metal_param_offsets_match_layout() {
+        let Some(device) = metal::Device::system_default() else {
+            eprintln!("no Metal device; skipping");
+            return;
+        };
+        let layout = awkward_layout();
+        let effect = "float4 effect(float2 uv, constant EffectUniforms &u, constant EffectParams &p) { return p.e + p.a; }";
+        assert_params_match(&device, &msl(effect, &layout), &layout);
+    }
+
+    /// Naga lays out the WGSL preamble's structs; Metal must read them at
+    /// the offsets Rust uploads, for the uniforms and the awkward params.
+    #[test]
+    fn metal_wgsl_offsets_match_rust() {
+        let Some(device) = metal::Device::system_default() else {
+            eprintln!("no Metal device; skipping");
+            return;
+        };
+        let layout = awkward_layout();
+        let effect = "fn effect(uv: vec2<f32>) -> vec4<f32> { return p.e + p.a + u.corner_radii + u.time + f32(u.frame) + u.delta; }";
+        let source = full_source(&Source::Wgsl(effect.into()), &layout).unwrap();
+        assert_params_match(&device, &source, &layout);
+        let uniforms = fragment_argument(&device, &source, "u");
+        assert_eq!(
+            uniforms.buffer_data_size() as usize,
+            std::mem::size_of::<EffectUniforms>()
+        );
+        let metal_offset = member_offsets(&uniforms);
+        assert_eq!(metal_offset("time"), offset_of!(EffectUniforms, time));
+        assert_eq!(metal_offset("frame"), offset_of!(EffectUniforms, frame));
+        assert_eq!(metal_offset("delta"), offset_of!(EffectUniforms, delta));
+        assert_eq!(
+            metal_offset("corner_radii"),
+            offset_of!(EffectUniforms, corner_radii)
+        );
     }
 
     #[test]
@@ -767,7 +857,7 @@ mod tests {
             return;
         };
         let effect = "float4 effect(float2 uv, constant EffectUniforms &u, EffectImages i) { return i.sample(1, uv) * i.size(1).x; }";
-        let source = full_source(effect, &ParamLayout::empty());
+        let source = msl(effect, &ParamLayout::empty());
         device
             .new_library_with_source(&source, &metal::CompileOptions::new())
             .expect("image preamble compiles")
@@ -784,6 +874,28 @@ mod tests {
         effect.set_source("float4 effect(float2 uv, constant EffectUniforms &u) { return 0; }");
         assert!(matches!(effect.0.borrow().pipeline, Pipeline::Pending));
         assert!(!effect.reads_pointer());
+    }
+
+    /// A WGSL effect that reads `p` counts as reading params; one that
+    /// does not gets the warning, same as MSL without `EffectParams`.
+    #[test]
+    fn wgsl_source_reads_params_through_p() {
+        let reads = |wgsl: &str| Source::Wgsl(wgsl.into()).reads_params();
+        assert!(reads(
+            "fn effect(uv: vec2<f32>) -> vec4<f32> { return p.tint; }"
+        ));
+        assert!(!reads(
+            "fn effect(uv: vec2<f32>) -> vec4<f32> { return vec4(uv, 0.0, 1.0); }"
+        ));
+        // `tmp.x` is not a params read.
+        assert!(!reads(
+            "fn effect(uv: vec2<f32>) -> vec4<f32> { let tmp = vec4(uv, 0.0, 1.0); return tmp.xyzw; }"
+        ));
+        let effect =
+            Effect::wgsl("fn effect(uv: vec2<f32>) -> vec4<f32> { return vec4(uv, 0.0, 1.0); }");
+        assert!(!effect.0.borrow().source.reads_params());
+        effect.set_wgsl("fn effect(uv: vec2<f32>) -> vec4<f32> { return p.tint; }");
+        assert!(effect.0.borrow().source.reads_params());
     }
 
     #[test]
@@ -826,7 +938,7 @@ mod tests {
         };
         let effect = "float4 effect(float2 uv, constant EffectUniforms &u, EffectBackdrop b) { return b.sample(uv); }";
         assert!(fragment_entry(effect).contains("effect(in.uv, u, backdrop)"));
-        let source = full_source(effect, &ParamLayout::empty());
+        let source = msl(effect, &ParamLayout::empty());
         let library = device
             .new_library_with_source(&source, &metal::CompileOptions::new())
             .expect("backdrop preamble compiles");
@@ -842,7 +954,7 @@ mod tests {
             return;
         };
         let effect = crate::glsl_to_msl(include_str!("../examples/shaders/crt.glsl"));
-        let source = full_source(&effect, &ParamLayout::empty());
+        let source = msl(&effect, &ParamLayout::empty());
         device
             .new_library_with_source(&source, &metal::CompileOptions::new())
             .expect("crt.glsl compiles");
